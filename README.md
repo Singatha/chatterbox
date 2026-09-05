@@ -1,8 +1,8 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **Phase 1 foundation**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, a React authentication UI, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **Phase 1 durable messaging foundation**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history, a responsive React chat workspace, migrations, tests, containers, and CI.
 
-The conversation and realtime messaging slice is intentionally the next increment. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
+Realtime delivery is intentionally the next increment. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
 
 ## Foundation features
 
@@ -12,10 +12,15 @@ The conversation and realtime messaging slice is intentionally the next incremen
 - JWT access tokens with configurable expiry
 - Persisted refresh tokens, one-time rotation, revocation, and logout
 - Bearer-protected `GET /auth/me` route
+- Authenticated user search without exposing email addresses
+- Idempotent direct-conversation creation using a canonical participant key
+- Membership-protected conversation and message access
+- PostgreSQL message persistence and deterministic cursor pagination
+- Conversation lists with latest-message summaries
 - Consistent API error envelopes without sensitive fields
 - Async SQLAlchemy 2 data access and Alembic migrations
-- Responsive React + TypeScript login and registration experience
-- TanStack Query for request state and a small Zustand session store
+- Responsive React + TypeScript authentication and chat workspace
+- TanStack Query for server state and focused Zustand session/chat stores
 - PostgreSQL, Redis, MinIO, backend, and frontend in Docker Compose
 - Backend integration tests and frontend component tests
 - GitHub Actions lint, test, type-check, and build validation
@@ -121,6 +126,13 @@ All request and response bodies use JSON. Interactive OpenAPI documentation is g
 | `POST` | `/auth/refresh` | Refresh token in body | Rotate and return a new token pair |
 | `POST` | `/auth/logout` | Refresh token in body | Revoke the refresh token |
 | `GET` | `/auth/me` | Bearer access token | Return the current user |
+| `GET` | `/users?q=` | Bearer access token | Search other users |
+| `GET` | `/users/{id}` | Bearer access token | Get a public user profile |
+| `POST` | `/conversations` | Bearer access token | Start or retrieve a direct conversation |
+| `GET` | `/conversations` | Bearer access token | List the current user's conversations |
+| `GET` | `/conversations/{id}` | Bearer access token | Get an authorized conversation |
+| `GET` | `/conversations/{id}/messages` | Bearer access token | Read cursor-paginated history |
+| `POST` | `/conversations/{id}/messages` | Bearer access token | Persist a message |
 
 Errors have one stable envelope:
 
@@ -175,7 +187,7 @@ npm run build
 
 ## Planned WebSocket protocol
 
-`WS /ws` is not enabled in this foundation increment. The next slice will authenticate during the handshake and use discriminated event envelopes rather than endpoint-specific message handling:
+`WS /ws` is not enabled yet. The next slice will authenticate during the handshake and use discriminated event envelopes rather than endpoint-specific message handling:
 
 ```json
 {
@@ -188,7 +200,7 @@ npm run build
 }
 ```
 
-The server will acknowledge or emit persisted events such as `message.created`. Presence, typing, delivery/read receipts, reconnection recovery, and Redis Pub/Sub will be added only after direct message persistence and same-instance realtime delivery are verified.
+The server will acknowledge or emit persisted events such as `message.created`. Presence, typing, delivery/read receipts, reconnection recovery, and Redis Pub/Sub will be added only after same-instance realtime delivery is verified.
 
 ## Engineering decisions
 
@@ -236,4 +248,4 @@ The server will acknowledge or emit persisted events such as `message.created`. 
 
 ## Next increment
 
-Implement the first vertical chat slice: user search, direct-conversation creation with membership authorization, cursor-paginated message history, and message persistence. Once those REST paths pass integration tests, add the authenticated in-memory WebSocket manager and deliver `message.created` events between two browser sessions.
+Add the authenticated in-memory WebSocket manager and deliver persisted `message.created` events between two browser sessions. Keep PostgreSQL writes in the existing message service, then publish the committed result through a typed event handler. Include reconnect backoff and REST cursor recovery before introducing Redis Pub/Sub.

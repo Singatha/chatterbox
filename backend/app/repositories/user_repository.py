@@ -29,5 +29,18 @@ class UserRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def search(self, query: str, exclude_user_id: UUID, limit: int) -> list[User]:
+        normalized = query.strip().lower()
+        statement = select(User).where(User.id != exclude_user_id)
+        if normalized:
+            statement = statement.where(
+                or_(
+                    User.username.contains(normalized, autoescape=True),
+                    User.email.contains(normalized, autoescape=True),
+                )
+            )
+        result = await self.session.execute(statement.order_by(User.username).limit(limit))
+        return list(result.scalars().all())
+
     def add(self, user: User) -> None:
         self.session.add(user)
