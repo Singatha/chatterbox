@@ -72,10 +72,21 @@ test('authenticates, emits message events, and validates server frames', () => {
     conversation_id: 'conversation-1',
     content: 'Hello',
   })
+  expect(client.sendTyping('conversation-1', true)).toBe(true)
+  expect(client.markRead('conversation-1', 'message-1')).toBe(true)
+  expect(JSON.parse(socket.sent[1])).toEqual({
+    type: 'typing.start',
+    conversation_id: 'conversation-1',
+  })
+  expect(JSON.parse(socket.sent[2])).toMatchObject({
+    type: 'message.read',
+    conversation_id: 'conversation-1',
+    message_id: 'message-1',
+  })
   socket.receive({ type: 'message.created', data: { id: 'incomplete' } })
   socket.receive({
     type: 'connection.ready',
-    data: { user_id: 'user-1' },
+    data: { user_id: 'user-1', online_user_ids: [] },
   })
 
   expect(events).toHaveLength(1)
@@ -119,6 +130,7 @@ test('realtime store deduplicates messages by durable id', () => {
     created_at: '2026-09-05T12:00:00Z',
     edited_at: null,
     cursor: 'cursor-1',
+    receipts: [],
   }
   useChatStore.getState().addRealtimeMessage(message)
   useChatStore.getState().addRealtimeMessage(message)
@@ -126,3 +138,32 @@ test('realtime store deduplicates messages by durable id', () => {
   expect(useChatStore.getState().realtimeMessages['conversation-1']).toEqual([message])
 })
 
+test('realtime store tracks presence, typing, and receipt transitions', () => {
+  const store = useChatStore.getState()
+  store.clearRealtimeState()
+  store.setPresenceSnapshot(['user-2'])
+  store.setTyping('conversation-1', 'user-2', true)
+  store.updateReceipt({
+    message_id: 'message-1',
+    conversation_id: 'conversation-1',
+    user_id: 'user-2',
+    delivered_at: '2026-09-05T12:01:00Z',
+    read_at: null,
+  })
+
+  expect(useChatStore.getState().presence['user-2'].online).toBe(true)
+  expect(useChatStore.getState().typingUsers['conversation-1']).toEqual(['user-2'])
+  expect(useChatStore.getState().receiptUpdates['message-1'].delivered_at).not.toBeNull()
+
+  useChatStore.getState().setTyping('conversation-1', 'user-2', false)
+  useChatStore.getState().setPresence(
+    'user-2',
+    false,
+    '2026-09-05T12:02:00Z',
+  )
+  expect(useChatStore.getState().typingUsers['conversation-1']).toEqual([])
+  expect(useChatStore.getState().presence['user-2']).toEqual({
+    online: false,
+    lastSeen: '2026-09-05T12:02:00Z',
+  })
+})

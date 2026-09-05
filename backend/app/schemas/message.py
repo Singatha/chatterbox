@@ -17,6 +17,14 @@ class MessageCreate(BaseModel):
         return value
 
 
+class MessageReceiptResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: UUID
+    delivered_at: Optional[datetime]
+    read_at: Optional[datetime]
+
+
 class MessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -28,6 +36,7 @@ class MessageResponse(BaseModel):
     created_at: datetime
     edited_at: Optional[datetime]
     cursor: str
+    receipts: list[MessageReceiptResponse]
 
 
 class MessagePage(BaseModel):

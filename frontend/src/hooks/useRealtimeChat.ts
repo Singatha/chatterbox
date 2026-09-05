@@ -46,6 +46,10 @@ export function useRealtimeChat(accessToken: string | null, onError: (event: Err
   const errorHandlerRef = useRef(onError)
   const addMessage = useChatStore((state) => state.addRealtimeMessage)
   const setStatus = useChatStore((state) => state.setConnectionStatus)
+  const setPresenceSnapshot = useChatStore((state) => state.setPresenceSnapshot)
+  const setPresence = useChatStore((state) => state.setPresence)
+  const setTyping = useChatStore((state) => state.setTyping)
+  const updateReceipt = useChatStore((state) => state.updateReceipt)
   const status = useChatStore((state) => state.connectionStatus)
 
   useEffect(() => { errorHandlerRef.current = onError }, [onError])
@@ -56,6 +60,19 @@ export function useRealtimeChat(accessToken: string | null, onError: (event: Err
       if (event.type === 'message.created') {
         addMessage(event.data)
         void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+      } else if (event.type === 'connection.ready') {
+        setPresenceSnapshot(event.data.online_user_ids)
+      } else if (event.type === 'presence.online') {
+        setPresence(event.data.user_id, true)
+      } else if (event.type === 'presence.offline') {
+        setPresence(event.data.user_id, false, event.data.last_seen)
+      } else if (event.type === 'typing.start' || event.type === 'typing.stop') {
+        setTyping(event.data.conversation_id, event.data.user_id, event.type === 'typing.start')
+      } else if (event.type === 'message.delivered' || event.type === 'message.read') {
+        updateReceipt(event.data)
+        if (event.type === 'message.read') {
+          void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+        }
       } else if (event.type === 'error') {
         errorHandlerRef.current(event)
       }
@@ -76,12 +93,31 @@ export function useRealtimeChat(accessToken: string | null, onError: (event: Err
       client.disconnect()
       clientRef.current = null
     }
-  }, [accessToken, addMessage, queryClient, setStatus])
+  }, [
+    accessToken,
+    addMessage,
+    queryClient,
+    setPresence,
+    setPresenceSnapshot,
+    setStatus,
+    setTyping,
+    updateReceipt,
+  ])
 
   const sendMessage = useCallback(
     (conversationId: string, content: string) =>
       clientRef.current?.sendMessage(conversationId, content) ?? false,
     [],
   )
-  return { status, sendMessage }
+  const sendTyping = useCallback(
+    (conversationId: string, isTyping: boolean) =>
+      clientRef.current?.sendTyping(conversationId, isTyping) ?? false,
+    [],
+  )
+  const markRead = useCallback(
+    (conversationId: string, messageId: string) =>
+      clientRef.current?.markRead(conversationId, messageId) ?? false,
+    [],
+  )
+  return { status, sendMessage, sendTyping, markRead }
 }

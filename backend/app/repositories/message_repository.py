@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.message import Message
 
@@ -18,11 +18,20 @@ class MessageRepository:
     def add(self, message: Message) -> None:
         self.session.add(message)
 
+    async def get_by_id(self, message_id: UUID) -> Optional[Message]:
+        result = await self.session.execute(
+            select(Message)
+            .where(Message.id == message_id)
+            .options(joinedload(Message.sender), selectinload(Message.receipts))
+        )
+        return result.scalar_one_or_none()
+
     async def get_latest(self, conversation_id: UUID) -> Optional[Message]:
         result = await self.session.execute(
             select(Message)
             .where(Message.conversation_id == conversation_id, Message.deleted_at.is_(None))
             .options(joinedload(Message.sender))
+            .options(selectinload(Message.receipts))
             .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(1)
         )
@@ -39,6 +48,7 @@ class MessageRepository:
             select(Message)
             .where(Message.conversation_id == conversation_id, Message.deleted_at.is_(None))
             .options(joinedload(Message.sender))
+            .options(selectinload(Message.receipts))
         )
         if before_created_at is not None and before_id is not None:
             statement = statement.where(
@@ -70,6 +80,7 @@ class MessageRepository:
                 ),
             )
             .options(joinedload(Message.sender))
+            .options(selectinload(Message.receipts))
             .order_by(Message.created_at, Message.id)
             .limit(limit + 1)
         )

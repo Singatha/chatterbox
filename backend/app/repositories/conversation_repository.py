@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from app.models.conversation import Conversation
 from app.models.conversation_member import ConversationMember
@@ -65,6 +65,38 @@ class ConversationRepository:
             )
         )
         return list(result.scalars().all())
+
+    async def peer_ids(self, user_id: UUID) -> list[UUID]:
+        own_membership = aliased(ConversationMember)
+        peer_membership = aliased(ConversationMember)
+        result = await self.session.execute(
+            select(peer_membership.user_id)
+            .join(
+                own_membership,
+                own_membership.conversation_id == peer_membership.conversation_id,
+            )
+            .where(
+                own_membership.user_id == user_id,
+                peer_membership.user_id != user_id,
+            )
+            .distinct()
+        )
+        return list(result.scalars().all())
+
+    async def unread_count(self, conversation_id: UUID, user_id: UUID) -> int:
+        from app.models.message import Message
+        from app.models.message_receipt import MessageReceipt
+
+        result = await self.session.execute(
+            select(func.count(MessageReceipt.id))
+            .join(Message, Message.id == MessageReceipt.message_id)
+            .where(
+                Message.conversation_id == conversation_id,
+                MessageReceipt.user_id == user_id,
+                MessageReceipt.read_at.is_(None),
+            )
+        )
+        return int(result.scalar_one())
 
     def add(self, conversation: Conversation) -> None:
         self.session.add(conversation)

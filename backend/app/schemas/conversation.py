@@ -13,6 +13,7 @@ class ConversationMemberResponse(BaseModel):
     user_id: UUID
     username: str
     role: str
+    last_seen: Optional[datetime]
 
 
 class MessageSummary(BaseModel):
@@ -34,4 +35,4 @@ class ConversationResponse(BaseModel):
     updated_at: datetime
     members: list[ConversationMemberResponse]
     last_message: Optional[MessageSummary] = None
-
+    unread_count: int = 0

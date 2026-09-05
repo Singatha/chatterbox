@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.models.message import Message
+from app.models.message_receipt import MessageReceipt
 from app.repositories.message_repository import MessageRepository
 from app.schemas.message import MessagePage, MessageResponse
 from app.services.conversation_service import ConversationService
@@ -50,6 +51,11 @@ class MessageService:
             sender_id=sender_id,
             content=content,
         )
+        message.receipts = [
+            MessageReceipt(user_id=member.user_id)
+            for member in conversation.members
+            if member.user_id != sender_id
+        ]
         self.messages.add(message)
         await self.session.flush()
         await self.conversation_service.touch(conversation)
@@ -107,4 +113,5 @@ class MessageService:
             created_at=message.created_at,
             edited_at=message.edited_at,
             cursor=encode_cursor(message),
+            receipts=message.receipts,
         )

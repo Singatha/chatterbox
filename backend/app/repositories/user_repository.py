@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
@@ -44,3 +45,9 @@ class UserRepository:
 
     def add(self, user: User) -> None:
         self.session.add(user)
+
+    async def set_last_seen(self, user_id: UUID, last_seen: datetime) -> None:
+        user = await self.get_by_id(user_id)
+        if user is not None:
+            user.last_seen = last_seen
+            await self.session.flush()

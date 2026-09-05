@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr
@@ -20,3 +21,4 @@ class UserPublicResponse(BaseModel):
     id: UUID
     username: str
     created_at: datetime
+    last_seen: Optional[datetime]

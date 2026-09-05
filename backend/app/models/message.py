@@ -37,3 +37,6 @@ class Message(Base):
         back_populates="messages"
     )
     sender: Mapped["User"] = relationship(lazy="joined")  # noqa: F821, UP037
+    receipts: Mapped[list["MessageReceipt"]] = relationship(  # noqa: F821, UP037
+        back_populates="message", cascade="all, delete-orphan", lazy="selectin"
+    )
