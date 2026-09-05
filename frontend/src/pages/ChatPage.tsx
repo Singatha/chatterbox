@@ -7,8 +7,8 @@ import {
   UserOutlined,
 } from '@ant-design/icons'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Avatar, Button, Empty, Input, List, Modal, Spin, Tooltip, message } from 'antd'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Alert, Avatar, Badge, Button, Empty, Input, List, Modal, Spin, Tooltip, message } from 'antd'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { authApi } from '../api/auth'
 import { chatApi } from '../api/chat'
 import { ApiError } from '../api/client'
@@ -17,6 +17,16 @@ import type { ErrorEvent } from '../realtime/events'
 import { useAuthStore } from '../stores/authStore'
 import { useChatStore } from '../stores/chatStore'
 import { conversationTitle, initials } from '../utils/chat'
+
+function lastSeenLabel(value: string | null): string {
+  if (!value) return 'Offline'
+  return `Last seen ${new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`
+}
 
 export function ChatPage() {
   const queryClient = useQueryClient()
@@ -27,10 +37,16 @@ export function ChatPage() {
   const selectedId = useChatStore((state) => state.selectedConversationId)
   const selectConversation = useChatStore((state) => state.selectConversation)
   const realtimeMessagesByConversation = useChatStore((state) => state.realtimeMessages)
+  const presence = useChatStore((state) => state.presence)
+  const typingUsers = useChatStore((state) => state.typingUsers)
+  const receiptUpdates = useChatStore((state) => state.receiptUpdates)
   const clearRealtimeState = useChatStore((state) => state.clearRealtimeState)
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [draft, setDraft] = useState('')
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const typingConversationRef = useRef<string | null>(null)
+  const lastReadRef = useRef<string | null>(null)
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -71,7 +87,41 @@ export function ChatPage() {
     (event: ErrorEvent) => void message.error(event.error.message),
     [],
   )
-  const realtime = useRealtimeChat(accessToken, handleRealtimeError)
+  const {
+    status: realtimeStatus,
+    sendMessage: sendRealtimeMessage,
+    sendTyping,
+    markRead,
+  } = useRealtimeChat(accessToken, handleRealtimeError)
+  const peer = selected?.members.find((member) => member.user_id !== user?.id) ?? null
+  const peerPresence = peer ? presence[peer.user_id] : undefined
+  const peerOnline = peerPresence?.online ?? false
+  const peerLastSeen = peerPresence?.lastSeen ?? peer?.last_seen ?? null
+  const peerTyping = Boolean(
+    selectedId && peer && (typingUsers[selectedId] ?? []).includes(peer.user_id),
+  )
+
+  const stopTyping = useCallback(() => {
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    typingTimerRef.current = null
+    if (typingConversationRef.current) {
+      sendTyping(typingConversationRef.current, false)
+      typingConversationRef.current = null
+    }
+  }, [sendTyping])
+
+  useEffect(() => () => stopTyping(), [selectedId, stopTyping])
+
+  useEffect(() => {
+    const latestInbound = [...messages].reverse().find((item) => item.sender_id !== user?.id)
+    if (!selectedId || realtimeStatus !== 'connected' || !latestInbound) return
+    const receipt = receiptUpdates[latestInbound.id]
+      ?? latestInbound.receipts.find((item) => item.user_id === user?.id)
+    if (receipt?.read_at || lastReadRef.current === latestInbound.id) return
+    if (markRead(selectedId, latestInbound.id)) {
+      lastReadRef.current = latestInbound.id
+    }
+  }, [markRead, messages, receiptUpdates, realtimeStatus, selectedId, user?.id])
 
   const usersQuery = useQuery({
     queryKey: ['users', search],
@@ -117,11 +167,27 @@ export function ChatPage() {
   const submitMessage = () => {
     const content = draft.trim()
     if (!content || !selectedId || sendMessage.isPending) return
-    if (realtime.status === 'connected' && realtime.sendMessage(selectedId, content)) {
+    stopTyping()
+    if (realtimeStatus === 'connected' && sendRealtimeMessage(selectedId, content)) {
       setDraft('')
       return
     }
     sendMessage.mutate(content)
+  }
+
+  const updateDraft = (value: string) => {
+    setDraft(value)
+    if (!selectedId || realtimeStatus !== 'connected') return
+    if (!value.trim()) {
+      stopTyping()
+      return
+    }
+    if (typingConversationRef.current !== selectedId) {
+      stopTyping()
+      if (sendTyping(selectedId, true)) typingConversationRef.current = selectedId
+    }
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current)
+    typingTimerRef.current = setTimeout(stopTyping, 1500)
   }
 
   const connectionLabel = {
@@ -129,7 +195,7 @@ export function ChatPage() {
     connecting: 'Connecting',
     reconnecting: 'Reconnecting',
     disconnected: 'Offline',
-  }[realtime.status]
+  }[realtimeStatus]
 
   return (
     <main className="chat-shell">
@@ -140,7 +206,7 @@ export function ChatPage() {
         </div>
         <div className="current-user">
           <Avatar className="avatar purple">{initials(user.username)}</Avatar>
-          <div><strong>{user.username}</strong><span className={`connection-state ${realtime.status}`}><i />{connectionLabel}</span></div>
+          <div><strong>{user.username}</strong><span className={`connection-state ${realtimeStatus}`}><i />{connectionLabel}</span></div>
           <Tooltip title="Sign out"><Button type="text" icon={<LogoutOutlined />} loading={logout.isPending} onClick={() => logout.mutate()} /></Tooltip>
         </div>
         <div className="conversation-heading">
@@ -154,10 +220,15 @@ export function ChatPage() {
             </Empty>
           ) : conversations.map((conversation) => {
             const title = conversationTitle(conversation, user.id)
+            const conversationPeer = conversation.members.find((member) => member.user_id !== user.id)
+            const online = conversationPeer
+              ? presence[conversationPeer.user_id]?.online ?? false
+              : false
             return (
               <button key={conversation.id} type="button" className={`conversation-row ${selectedId === conversation.id ? 'active' : ''}`} onClick={() => selectConversation(conversation.id)}>
-                <Avatar className="avatar">{initials(title)}</Avatar>
+                <Badge dot color={online ? '#29b474' : '#b8b9c5'} offset={[-2, 30]}><Avatar className="avatar">{initials(title)}</Avatar></Badge>
                 <span className="conversation-copy"><strong>{title}</strong><small>{conversation.last_message?.content ?? 'Start the conversation'}</small></span>
+                {conversation.unread_count > 0 && <Badge count={conversation.unread_count} overflowCount={99} />}
               </button>
             )
           })}
@@ -171,17 +242,20 @@ export function ChatPage() {
           <>
             <header className="chat-header">
               <Avatar className="avatar">{initials(conversationTitle(selected, user.id))}</Avatar>
-              <div><strong>{conversationTitle(selected, user.id)}</strong><span>Direct message · {connectionLabel}</span></div>
+              <div><strong>{conversationTitle(selected, user.id)}</strong><span>{peerOnline ? 'Online' : lastSeenLabel(peerLastSeen)}</span></div>
             </header>
             <div className="message-scroll">
               {messagesQuery.hasNextPage && <Button className="load-older" loading={messagesQuery.isFetchingNextPage} onClick={() => messagesQuery.fetchNextPage()}>Load older messages</Button>}
               {messagesQuery.isLoading ? <Spin className="center-spin" /> : messagesQuery.error ? <Alert type="error" message="Messages could not be loaded" /> : messages.length === 0 ? <div className="first-message"><Avatar size={58} className="avatar">{initials(conversationTitle(selected, user.id))}</Avatar><h3>Start your conversation with {conversationTitle(selected, user.id)}</h3><p>Messages are private to conversation members.</p></div> : messages.map((item) => {
                 const own = item.sender_id === user.id
-                return <div key={item.id} className={`message-line ${own ? 'own' : ''}`}><div className="message-meta"><strong>{own ? 'You' : item.sender_username}</strong><time>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div><div className="message-bubble">{item.content}</div></div>
+                const receipt = receiptUpdates[item.id] ?? item.receipts[0]
+                const receiptLabel = receipt?.read_at ? 'Read' : receipt?.delivered_at ? 'Delivered' : 'Sent'
+                return <div key={item.id} className={`message-line ${own ? 'own' : ''}`}><div className="message-meta"><strong>{own ? 'You' : item.sender_username}</strong><time>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div><div className="message-bubble">{item.content}</div>{own && <small className="receipt-state">{receiptLabel}</small>}</div>
               })}
+              {peerTyping && <div className="typing-indicator"><i /><i /><i /><span>{peer?.username} is typing</span></div>}
             </div>
             <div className="composer">
-              <Input.TextArea aria-label="Message" rows={1} value={draft} placeholder={`Message ${conversationTitle(selected, user.id)}`} onChange={(event) => setDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); submitMessage() } }} />
+              <Input.TextArea aria-label="Message" rows={1} value={draft} placeholder={`Message ${conversationTitle(selected, user.id)}`} onChange={(event) => updateDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); submitMessage() } }} />
               <Button type="primary" shape="circle" aria-label="Send message" icon={<SendOutlined />} loading={sendMessage.isPending} disabled={!draft.trim()} onClick={submitMessage} />
             </div>
           </>

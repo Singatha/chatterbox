@@ -1,6 +1,6 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **Phase 1 realtime messaging MVP**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history, authenticated WebSocket delivery, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **single-instance realtime chat release**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history and receipts, presence, typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
 
 Realtime delivery currently uses an in-process connection manager. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
 
@@ -17,9 +17,13 @@ Realtime delivery currently uses an in-process connection manager. Redis and Min
 - Membership-protected conversation and message access
 - PostgreSQL message persistence and deterministic cursor pagination
 - Conversation lists with latest-message summaries
+- Per-conversation unread counts and read-through acknowledgements
 - Authenticated `WS /ws` connections using the WebSocket subprotocol header
-- Typed `message.send`, `message.created`, connection, and error events
+- Typed message, receipt, presence, typing, connection, and error events
 - Member-targeted delivery after successful database commit
+- First/last-socket presence transitions with durable `last_seen` timestamps
+- Automatic delivery acknowledgement when an online recipient receives a message
+- Expiring typing indicators that cannot remain stuck indefinitely
 - Automatic reconnect with exponential backoff up to 30 seconds
 - Post-cursor REST recovery for messages missed while disconnected
 - Consistent API error envelopes without sensitive fields
@@ -206,6 +210,10 @@ Client event:
 }
 ```
 
+Clients can also send `typing.start`, `typing.stop`, and `message.read` events. Typing
+events contain a `conversation_id`; a read event contains the conversation and latest
+visible message IDs. The server verifies membership for every event.
+
 Successful server event:
 
 ```json
@@ -220,12 +228,24 @@ Successful server event:
     "content": "Hello",
     "created_at": "timestamp",
     "edited_at": null,
-    "cursor": "opaque-cursor"
+    "cursor": "opaque-cursor",
+    "receipts": [
+      {
+        "user_id": "recipient-uuid",
+        "delivered_at": null,
+        "read_at": null
+      }
+    ]
   }
 }
 ```
 
-Invalid or unauthorized events return a typed `error` event with the originating `request_id` when available. A message is broadcast to every active connection for each member, including the sender's other tabs, only after PostgreSQL commits.
+Server-pushed state changes use `presence.online`, `presence.offline`, `typing.start`,
+`typing.stop`, `message.delivered`, and `message.read`. `connection.ready` includes the
+currently online conversation peers. Invalid or unauthorized events return a typed
+`error` event with the originating `request_id` when available. A message is broadcast
+to every active connection for each member, including the sender's other tabs, only
+after PostgreSQL commits.
 
 The browser reconnects with exponential backoff. After a successful reconnection, it uses the last durable message cursor with the REST `after` parameter, merges recovered records into the Zustand realtime store, and deduplicates them by message UUID.
 
@@ -235,6 +255,8 @@ The browser reconnects with exponential backoff. After a successful reconnection
 - **Subprotocol authentication:** access tokens are carried in `Sec-WebSocket-Protocol`, avoiding query-string token leakage. A future cookie-based deployment can replace this without changing event payloads.
 - **Persist then publish:** `message.send` reuses the same authorization and persistence service as REST. A failed transaction never produces `message.created`.
 - **PostgreSQL as source of truth:** a message is delivered as a durable event only after it has been authorized and persisted. Redis will never be the canonical message store.
+- **Durable receipts, ephemeral activity:** delivered/read timestamps and `last_seen` live in PostgreSQL. Active sockets and typing expiry timers are intentionally process-local until the scale-out increment.
+- **Multi-tab presence semantics:** only a user's first connection emits online and only their last disconnection records `last_seen` and emits offline.
 - **Refresh rotation:** server-side token records make logout and replay prevention possible without storing raw tokens.
 - **UUID identifiers:** IDs can be created safely across future application instances without relying on a central sequence.
 - **Redis is deliberately idle today:** the MVP should prove one-process connection management first. In the scale-out phase, instances will publish user-targeted events so recipients connected to a different process receive them.
@@ -250,7 +272,7 @@ The browser reconnects with exponential backoff. After a successful reconnection
 ├── backend
 │   ├── alembic/
 │   │   ├── env.py
-│   │   └── versions/20260905_0001_create_users.py
+│   │   └── versions/          # users, messaging, and receipt migrations
 │   ├── app
 │   │   ├── api/                 # HTTP routes and dependencies
 │   │   ├── core/                # configuration, database, errors, security
@@ -277,4 +299,4 @@ The browser reconnects with exponential backoff. After a successful reconnection
 
 ## Next increment
 
-Add presence, typing indicators, delivered status, read receipts, and unread counts on top of the typed event protocol. Keep these ephemeral features in memory for one instance first; once their semantics and tests are stable, introduce Redis Pub/Sub and presence keys for horizontal scaling.
+Introduce Redis Pub/Sub and expiring presence keys so user-targeted events and activity state work across multiple backend instances. PostgreSQL remains authoritative for messages, receipts, unread counts, and `last_seen`.

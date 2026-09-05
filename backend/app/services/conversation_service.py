@@ -39,7 +39,7 @@ class ConversationService:
         key = direct_key(current_user_id, participant_id)
         existing = await self.conversations.get_direct_by_key(key)
         if existing is not None:
-            return await self._to_response(existing)
+            return await self._to_response(existing, current_user_id)
 
         conversation = Conversation(type="direct", direct_key=key, created_by=current_user_id)
         conversation.members = [
@@ -54,15 +54,15 @@ class ConversationService:
             existing = await self.conversations.get_direct_by_key(key)
             if existing is None:
                 raise
-            return await self._to_response(existing)
+            return await self._to_response(existing, current_user_id)
         created = await self.conversations.get_by_id(conversation.id)
         if created is None:  # pragma: no cover - defensive invariant
             raise AppError(500, "CONVERSATION_CREATE_FAILED", "Conversation could not be created")
-        return await self._to_response(created)
+        return await self._to_response(created, current_user_id)
 
     async def list(self, current_user_id: UUID) -> list[ConversationResponse]:
         conversations = await self.conversations.list_for_user(current_user_id)
-        return [await self._to_response(item) for item in conversations]
+        return [await self._to_response(item, current_user_id) for item in conversations]
 
     async def get_authorized(
         self, conversation_id: UUID, current_user_id: UUID
@@ -75,13 +75,17 @@ class ConversationService:
         return conversation
 
     async def get(self, conversation_id: UUID, current_user_id: UUID) -> ConversationResponse:
-        return await self._to_response(await self.get_authorized(conversation_id, current_user_id))
+        return await self._to_response(
+            await self.get_authorized(conversation_id, current_user_id), current_user_id
+        )
 
     async def touch(self, conversation: Conversation) -> None:
         conversation.updated_at = datetime.now(timezone.utc)
         await self.session.flush()
 
-    async def _to_response(self, conversation: Conversation) -> ConversationResponse:
+    async def _to_response(
+        self, conversation: Conversation, current_user_id: UUID
+    ) -> ConversationResponse:
         latest = await self.messages.get_latest(conversation.id)
         summary = None
         if latest is not None:
@@ -104,9 +108,12 @@ class ConversationService:
                     user_id=member.user_id,
                     username=member.user.username,
                     role=member.role,
+                    last_seen=member.user.last_seen,
                 )
                 for member in conversation.members
             ],
             last_message=summary,
+            unread_count=await self.conversations.unread_count(
+                conversation.id, current_user_id
+            ),
         )
-

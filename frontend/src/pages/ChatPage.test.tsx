@@ -18,7 +18,12 @@ vi.mock('../api/chat', () => ({
 }))
 
 vi.mock('../hooks/useRealtimeChat', () => ({
-  useRealtimeChat: () => ({ status: 'disconnected', sendMessage: () => false }),
+  useRealtimeChat: () => ({
+    status: 'disconnected',
+    sendMessage: () => false,
+    sendTyping: () => false,
+    markRead: () => false,
+  }),
 }))
 
 const conversation = {
@@ -29,10 +34,11 @@ const conversation = {
   created_at: '2026-09-05T12:00:00Z',
   updated_at: '2026-09-05T12:00:00Z',
   members: [
-    { user_id: 'user-1', username: 'alice', role: 'member' },
-    { user_id: 'user-2', username: 'bob', role: 'member' },
+    { user_id: 'user-1', username: 'alice', role: 'member', last_seen: null },
+    { user_id: 'user-2', username: 'bob', role: 'member', last_seen: null },
   ],
   last_message: null,
+  unread_count: 1,
 }
 
 beforeEach(() => {
@@ -61,6 +67,7 @@ beforeEach(() => {
         created_at: '2026-09-05T12:01:00Z',
         edited_at: null,
         cursor: 'cursor-1',
+        receipts: [{ user_id: 'user-1', delivered_at: null, read_at: null }],
       },
     ],
     next_cursor: null,
@@ -75,6 +82,7 @@ beforeEach(() => {
     created_at: '2026-09-05T12:02:00Z',
     edited_at: null,
     cursor: 'cursor-2',
+    receipts: [{ user_id: 'user-2', delivered_at: null, read_at: null }],
   })
 })
 

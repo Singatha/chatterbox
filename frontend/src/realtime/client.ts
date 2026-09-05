@@ -1,5 +1,10 @@
 import type { ConnectionStatus } from '../stores/chatStore'
-import type { MessageSendEvent, ServerEvent } from './events'
+import type {
+  MessageReadRequest,
+  MessageSendEvent,
+  ServerEvent,
+  TypingRequest,
+} from './events'
 import { isServerEvent } from './events'
 
 interface RealtimeClientOptions {
@@ -39,13 +44,35 @@ export class RealtimeClient {
   }
 
   sendMessage(conversationId: string, content: string): boolean {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false
     const event: MessageSendEvent = {
       type: 'message.send',
       request_id: crypto.randomUUID(),
       conversation_id: conversationId,
       content,
     }
+    return this.sendEvent(event)
+  }
+
+  markRead(conversationId: string, messageId: string): boolean {
+    const event: MessageReadRequest = {
+      type: 'message.read',
+      request_id: crypto.randomUUID(),
+      conversation_id: conversationId,
+      message_id: messageId,
+    }
+    return this.sendEvent(event)
+  }
+
+  sendTyping(conversationId: string, isTyping: boolean): boolean {
+    const event: TypingRequest = {
+      type: isTyping ? 'typing.start' : 'typing.stop',
+      conversation_id: conversationId,
+    }
+    return this.sendEvent(event)
+  }
+
+  private sendEvent(event: MessageSendEvent | MessageReadRequest | TypingRequest): boolean {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false
     this.socket.send(JSON.stringify(event))
     return true
   }

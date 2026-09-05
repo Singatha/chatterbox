@@ -8,6 +8,13 @@ export interface ConversationMember {
   user_id: string
   username: string
   role: string
+  last_seen: string | null
+}
+
+export interface MessageReceipt {
+  user_id: string
+  delivered_at: string | null
+  read_at: string | null
 }
 
 export interface Message {
@@ -19,6 +26,7 @@ export interface Message {
   created_at: string
   edited_at: string | null
   cursor: string
+  receipts: MessageReceipt[]
 }
 
 export interface Conversation {
@@ -30,6 +38,7 @@ export interface Conversation {
   updated_at: string
   members: ConversationMember[]
   last_message: Pick<Message, 'id' | 'sender_id' | 'sender_username' | 'content' | 'created_at'> | null
+  unread_count: number
 }
 
 export interface MessagePage {
