@@ -1,8 +1,8 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **Phase 1 durable messaging foundation**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history, a responsive React chat workspace, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **Phase 1 realtime messaging MVP**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history, authenticated WebSocket delivery, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
 
-Realtime delivery is intentionally the next increment. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
+Realtime delivery currently uses an in-process connection manager. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
 
 ## Foundation features
 
@@ -17,6 +17,11 @@ Realtime delivery is intentionally the next increment. Redis and MinIO are inclu
 - Membership-protected conversation and message access
 - PostgreSQL message persistence and deterministic cursor pagination
 - Conversation lists with latest-message summaries
+- Authenticated `WS /ws` connections using the WebSocket subprotocol header
+- Typed `message.send`, `message.created`, connection, and error events
+- Member-targeted delivery after successful database commit
+- Automatic reconnect with exponential backoff up to 30 seconds
+- Post-cursor REST recovery for messages missed while disconnected
 - Consistent API error envelopes without sensitive fields
 - Async SQLAlchemy 2 data access and Alembic migrations
 - Responsive React + TypeScript authentication and chat workspace
@@ -33,7 +38,8 @@ flowchart LR
     API --> Services[Application services]
     Services --> Repos[Repositories]
     Repos --> DB[(PostgreSQL)]
-    API -. next increment .-> WS[WebSocket gateway]
+    Browser <-->|Typed realtime events| WS[WebSocket gateway]
+    WS --> Services
     WS -. scale-out phase .-> Redis[(Redis Pub/Sub)]
     Services -. attachment phase .-> MinIO[(MinIO)]
 ```
@@ -131,7 +137,7 @@ All request and response bodies use JSON. Interactive OpenAPI documentation is g
 | `POST` | `/conversations` | Bearer access token | Start or retrieve a direct conversation |
 | `GET` | `/conversations` | Bearer access token | List the current user's conversations |
 | `GET` | `/conversations/{id}` | Bearer access token | Get an authorized conversation |
-| `GET` | `/conversations/{id}/messages` | Bearer access token | Read cursor-paginated history |
+| `GET` | `/conversations/{id}/messages` | Bearer access token | Read history with `before` or recover with `after` |
 | `POST` | `/conversations/{id}/messages` | Bearer access token | Persist a message |
 
 Errors have one stable envelope:
@@ -185,26 +191,49 @@ npm test
 npm run build
 ```
 
-## Planned WebSocket protocol
+## WebSocket protocol
 
-`WS /ws` is not enabled yet. The next slice will authenticate during the handshake and use discriminated event envelopes rather than endpoint-specific message handling:
+Connect to `WS /ws` with two WebSocket subprotocol values: `access_token` followed by the JWT access token. The browser client does this with `new WebSocket(url, ['access_token', token])`. This avoids placing credentials in URLs and common access logs. The server negotiates the `access_token` protocol and rejects missing, invalid, or expired access tokens before accepting the connection.
+
+Client event:
 
 ```json
 {
   "type": "message.send",
   "request_id": "client-generated-id",
+  "conversation_id": "uuid",
+  "content": "Hello"
+}
+```
+
+Successful server event:
+
+```json
+{
+  "type": "message.created",
+  "request_id": "client-generated-id",
   "data": {
+    "id": "uuid",
     "conversation_id": "uuid",
-    "content": "Hello"
+    "sender_id": "uuid",
+    "sender_username": "alice",
+    "content": "Hello",
+    "created_at": "timestamp",
+    "edited_at": null,
+    "cursor": "opaque-cursor"
   }
 }
 ```
 
-The server will acknowledge or emit persisted events such as `message.created`. Presence, typing, delivery/read receipts, reconnection recovery, and Redis Pub/Sub will be added only after same-instance realtime delivery is verified.
+Invalid or unauthorized events return a typed `error` event with the originating `request_id` when available. A message is broadcast to every active connection for each member, including the sender's other tabs, only after PostgreSQL commits.
+
+The browser reconnects with exponential backoff. After a successful reconnection, it uses the last durable message cursor with the REST `after` parameter, merges recovered records into the Zustand realtime store, and deduplicates them by message UUID.
 
 ## Engineering decisions
 
 - **WebSockets for events, REST for resources:** REST remains cacheable and easy to paginate; WebSockets provide low-latency server push without polling.
+- **Subprotocol authentication:** access tokens are carried in `Sec-WebSocket-Protocol`, avoiding query-string token leakage. A future cookie-based deployment can replace this without changing event payloads.
+- **Persist then publish:** `message.send` reuses the same authorization and persistence service as REST. A failed transaction never produces `message.created`.
 - **PostgreSQL as source of truth:** a message is delivered as a durable event only after it has been authorized and persisted. Redis will never be the canonical message store.
 - **Refresh rotation:** server-side token records make logout and replay prevention possible without storing raw tokens.
 - **UUID identifiers:** IDs can be created safely across future application instances without relying on a central sequence.
@@ -248,4 +277,4 @@ The server will acknowledge or emit persisted events such as `message.created`. 
 
 ## Next increment
 
-Add the authenticated in-memory WebSocket manager and deliver persisted `message.created` events between two browser sessions. Keep PostgreSQL writes in the existing message service, then publish the committed result through a typed event handler. Include reconnect backoff and REST cursor recovery before introducing Redis Pub/Sub.
+Add presence, typing indicators, delivered status, read receipts, and unread counts on top of the typed event protocol. Keep these ephemeral features in memory for one instance first; once their semantics and tests are stable, introduce Redis Pub/Sub and presence keys for horizontal scaling.

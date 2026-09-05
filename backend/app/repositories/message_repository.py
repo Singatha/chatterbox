@@ -52,3 +52,25 @@ class MessageRepository:
         )
         return list(result.scalars().all())
 
+    async def page_after(
+        self,
+        conversation_id: UUID,
+        limit: int,
+        after_created_at: datetime,
+        after_id: UUID,
+    ) -> list[Message]:
+        result = await self.session.execute(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.deleted_at.is_(None),
+                or_(
+                    Message.created_at > after_created_at,
+                    and_(Message.created_at == after_created_at, Message.id > after_id),
+                ),
+            )
+            .options(joinedload(Message.sender))
+            .order_by(Message.created_at, Message.id)
+            .limit(limit + 1)
+        )
+        return list(result.scalars().all())

@@ -17,6 +17,10 @@ vi.mock('../api/chat', () => ({
   },
 }))
 
+vi.mock('../hooks/useRealtimeChat', () => ({
+  useRealtimeChat: () => ({ status: 'disconnected', sendMessage: () => false }),
+}))
+
 const conversation = {
   id: 'conversation-1',
   type: 'direct' as const,
@@ -56,6 +60,7 @@ beforeEach(() => {
         content: 'Hello Alice',
         created_at: '2026-09-05T12:01:00Z',
         edited_at: null,
+        cursor: 'cursor-1',
       },
     ],
     next_cursor: null,
@@ -69,6 +74,7 @@ beforeEach(() => {
     content: 'Hi Bob',
     created_at: '2026-09-05T12:02:00Z',
     edited_at: null,
+    cursor: 'cursor-2',
   })
 })
 
@@ -95,4 +101,3 @@ test('loads a conversation and sends a persisted message', async () => {
     )
   })
 })
-

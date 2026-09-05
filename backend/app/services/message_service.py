@@ -1,4 +1,5 @@
 import base64
+import binascii
 import json
 from datetime import datetime
 from typing import Optional
@@ -23,7 +24,14 @@ def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode())
         return datetime.fromisoformat(payload["created_at"]), UUID(payload["id"])
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        json.JSONDecodeError,
+    ) as exc:
         raise AppError(422, "INVALID_CURSOR", "Message cursor is invalid") from exc
 
 
@@ -55,10 +63,25 @@ class MessageService:
         current_user_id: UUID,
         limit: int,
         before: Optional[str],
+        after: Optional[str] = None,
     ) -> MessagePage:
         await self.conversation_service.get_authorized(conversation_id, current_user_id)
+        if before and after:
+            raise AppError(422, "INVALID_CURSOR", "Use either before or after, not both")
         before_created_at = None
         before_id = None
+        if after:
+            after_created_at, after_id = decode_cursor(after)
+            records = await self.messages.page_after(
+                conversation_id, limit, after_created_at, after_id
+            )
+            has_more = len(records) > limit
+            records = records[:limit]
+            next_cursor = encode_cursor(records[-1]) if has_more and records else None
+            return MessagePage(
+                items=[self._to_response(message) for message in records],
+                next_cursor=next_cursor,
+            )
         if before:
             before_created_at, before_id = decode_cursor(before)
         records = await self.messages.page_before(
@@ -83,4 +106,5 @@ class MessageService:
             content=message.content,
             created_at=message.created_at,
             edited_at=message.edited_at,
+            cursor=encode_cursor(message),
         )

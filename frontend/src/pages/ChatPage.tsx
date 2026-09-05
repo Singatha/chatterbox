@@ -8,10 +8,12 @@ import {
 } from '@ant-design/icons'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Avatar, Button, Empty, Input, List, Modal, Spin, Tooltip, message } from 'antd'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { authApi } from '../api/auth'
 import { chatApi } from '../api/chat'
 import { ApiError } from '../api/client'
+import { useRealtimeChat } from '../hooks/useRealtimeChat'
+import type { ErrorEvent } from '../realtime/events'
 import { useAuthStore } from '../stores/authStore'
 import { useChatStore } from '../stores/chatStore'
 import { conversationTitle, initials } from '../utils/chat'
@@ -24,6 +26,8 @@ export function ChatPage() {
   const clearSession = useAuthStore((state) => state.clearSession)
   const selectedId = useChatStore((state) => state.selectedConversationId)
   const selectConversation = useChatStore((state) => state.selectConversation)
+  const realtimeMessagesByConversation = useChatStore((state) => state.realtimeMessages)
+  const clearRealtimeState = useChatStore((state) => state.clearRealtimeState)
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [draft, setDraft] = useState('')
@@ -50,10 +54,24 @@ export function ChatPage() {
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled: Boolean(selectedId && accessToken),
   })
-  const messages = useMemo(
-    () => messagesQuery.data?.pages.slice().reverse().flatMap((page) => page.items) ?? [],
-    [messagesQuery.data],
+  const messages = useMemo(() => {
+    const persisted = messagesQuery.data?.pages.slice().reverse().flatMap((page) => page.items) ?? []
+    const realtimeMessages = selectedId
+      ? realtimeMessagesByConversation[selectedId] ?? []
+      : []
+    const unique = new Map([...persisted, ...realtimeMessages].map((item) => [item.id, item]))
+    return [...unique.values()].sort((left, right) =>
+      left.created_at === right.created_at
+        ? left.id.localeCompare(right.id)
+        : left.created_at.localeCompare(right.created_at),
+    )
+  }, [messagesQuery.data, realtimeMessagesByConversation, selectedId])
+
+  const handleRealtimeError = useCallback(
+    (event: ErrorEvent) => void message.error(event.error.message),
+    [],
   )
+  const realtime = useRealtimeChat(accessToken, handleRealtimeError)
 
   const usersQuery = useQuery({
     queryKey: ['users', search],
@@ -89,6 +107,7 @@ export function ChatPage() {
     onSettled: () => {
       queryClient.clear()
       selectConversation(null)
+      clearRealtimeState()
       clearSession()
     },
   })
@@ -97,8 +116,20 @@ export function ChatPage() {
 
   const submitMessage = () => {
     const content = draft.trim()
-    if (content && selectedId && !sendMessage.isPending) sendMessage.mutate(content)
+    if (!content || !selectedId || sendMessage.isPending) return
+    if (realtime.status === 'connected' && realtime.sendMessage(selectedId, content)) {
+      setDraft('')
+      return
+    }
+    sendMessage.mutate(content)
   }
+
+  const connectionLabel = {
+    connected: 'Live',
+    connecting: 'Connecting',
+    reconnecting: 'Reconnecting',
+    disconnected: 'Offline',
+  }[realtime.status]
 
   return (
     <main className="chat-shell">
@@ -109,7 +140,7 @@ export function ChatPage() {
         </div>
         <div className="current-user">
           <Avatar className="avatar purple">{initials(user.username)}</Avatar>
-          <div><strong>{user.username}</strong><span>Available</span></div>
+          <div><strong>{user.username}</strong><span className={`connection-state ${realtime.status}`}><i />{connectionLabel}</span></div>
           <Tooltip title="Sign out"><Button type="text" icon={<LogoutOutlined />} loading={logout.isPending} onClick={() => logout.mutate()} /></Tooltip>
         </div>
         <div className="conversation-heading">
@@ -140,7 +171,7 @@ export function ChatPage() {
           <>
             <header className="chat-header">
               <Avatar className="avatar">{initials(conversationTitle(selected, user.id))}</Avatar>
-              <div><strong>{conversationTitle(selected, user.id)}</strong><span>Direct message</span></div>
+              <div><strong>{conversationTitle(selected, user.id)}</strong><span>Direct message · {connectionLabel}</span></div>
             </header>
             <div className="message-scroll">
               {messagesQuery.hasNextPage && <Button className="load-older" loading={messagesQuery.isFetchingNextPage} onClick={() => messagesQuery.fetchNextPage()}>Load older messages</Button>}

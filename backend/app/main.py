@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
 from app.api.users import router as users_router
+from app.api.websocket import router as websocket_router
 from app.core.config import settings
 from app.core.database import engine
 from app.core.errors import register_error_handlers
@@ -30,6 +31,7 @@ register_error_handlers(app)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(conversations_router)
+app.include_router(websocket_router)
 
 
 @app.get("/health", tags=["system"])

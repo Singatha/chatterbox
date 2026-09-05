@@ -18,6 +18,7 @@ export interface Message {
   content: string
   created_at: string
   edited_at: string | null
+  cursor: string
 }
 
 export interface Conversation {
@@ -35,4 +36,3 @@ export interface MessagePage {
   items: Message[]
   next_cursor: string | null
 }
-

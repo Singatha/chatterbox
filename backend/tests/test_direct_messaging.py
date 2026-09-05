@@ -142,6 +142,45 @@ async def test_message_history_uses_cursor_pagination(client: AsyncClient) -> No
     assert older.json()["next_cursor"]
 
 
+async def test_message_history_recovers_records_after_cursor(client: AsyncClient) -> None:
+    alice = await register_user(client, "alice")
+    bob = await register_user(client, "bob")
+    conversation = await create_direct(client, alice, bob)
+    path = f"/conversations/{conversation['id']}/messages"
+    first = await client.post(
+        path, headers=auth_headers(alice), json={"content": "online"}
+    )
+    cursor = first.json()["cursor"]
+    await client.post(path, headers=auth_headers(bob), json={"content": "missed one"})
+    await client.post(path, headers=auth_headers(bob), json={"content": "missed two"})
+
+    recovered = await client.get(
+        f"{path}?after={cursor}", headers=auth_headers(alice)
+    )
+
+    assert recovered.status_code == 200
+    assert [item["content"] for item in recovered.json()["items"]] == [
+        "missed one",
+        "missed two",
+    ]
+
+
+async def test_before_and_after_cursors_are_mutually_exclusive(client: AsyncClient) -> None:
+    alice = await register_user(client, "alice")
+    bob = await register_user(client, "bob")
+    conversation = await create_direct(client, alice, bob)
+    path = f"/conversations/{conversation['id']}/messages"
+    sent = await client.post(path, headers=auth_headers(alice), json={"content": "one"})
+    cursor = sent.json()["cursor"]
+
+    response = await client.get(
+        f"{path}?before={cursor}&after={cursor}", headers=auth_headers(alice)
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_CURSOR"
+
+
 async def test_invalid_cursor_and_blank_message_are_rejected(client: AsyncClient) -> None:
     alice = await register_user(client, "alice")
     bob = await register_user(client, "bob")
@@ -159,4 +198,3 @@ async def test_invalid_cursor_and_blank_message_are_rejected(client: AsyncClient
     assert invalid_cursor.json()["error"]["code"] == "INVALID_CURSOR"
     assert blank.status_code == 422
     assert blank.json()["error"]["code"] == "VALIDATION_ERROR"
-

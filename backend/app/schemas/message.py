@@ -27,9 +27,9 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     edited_at: Optional[datetime]
+    cursor: str
 
 
 class MessagePage(BaseModel):
     items: list[MessageResponse]
     next_cursor: Optional[str]
-

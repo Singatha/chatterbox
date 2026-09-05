@@ -18,10 +18,14 @@ export const chatApi = {
       accessToken,
     )
   },
+  recoverMessages: (accessToken: string, conversationId: string, after: string) =>
+    authorizedRequest<MessagePage>(
+      `/conversations/${conversationId}/messages?limit=100&after=${encodeURIComponent(after)}`,
+      accessToken,
+    ),
   sendMessage: (accessToken: string, conversationId: string, content: string) =>
     authorizedRequest<Message>(`/conversations/${conversationId}/messages`, accessToken, {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),
 }
-
