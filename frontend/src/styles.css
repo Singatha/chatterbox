@@ -41,6 +41,10 @@ button, input { font: inherit; }
 .current-user div, .chat-header div { min-width: 0; display: flex; flex-direction: column; }
 .current-user strong, .chat-header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .current-user span, .chat-header span { margin-top: 2px; color: #858698; font-size: 12px; }
+.connection-state { display: flex !important; flex-direction: row !important; align-items: center; gap: 5px; }
+.connection-state i { width: 7px; height: 7px; border-radius: 50%; background: #a1a2ae; }
+.connection-state.connected i { background: #43b581; box-shadow: 0 0 0 3px rgba(67,181,129,.13); }
+.connection-state.connecting i, .connection-state.reconnecting i { background: #e3a52b; }
 .avatar { flex: 0 0 auto; color: #4339bd !important; font-weight: 700; background: #e9e7ff !important; }
 .avatar.purple { color: white !important; background: #6057e7 !important; }
 .conversation-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 20px 10px 24px; color: #77788a; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }

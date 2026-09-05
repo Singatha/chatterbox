@@ -42,9 +42,10 @@ async def list_messages(
     current_user: CurrentUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     before: Annotated[Optional[str], Query(max_length=512)] = None,
+    after: Annotated[Optional[str], Query(max_length=512)] = None,
 ) -> MessagePage:
     return await MessageService(session).list(
-        conversation_id, current_user.id, limit, before
+        conversation_id, current_user.id, limit, before, after
     )
 
 
@@ -62,4 +63,3 @@ async def create_message(
     return await MessageService(session).create(
         conversation_id, current_user.id, data.content
     )
-

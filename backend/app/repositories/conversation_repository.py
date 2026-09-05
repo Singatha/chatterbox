@@ -58,6 +58,13 @@ class ConversationRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def member_ids(self, conversation_id: UUID) -> list[UUID]:
+        result = await self.session.execute(
+            select(ConversationMember.user_id).where(
+                ConversationMember.conversation_id == conversation_id
+            )
+        )
+        return list(result.scalars().all())
+
     def add(self, conversation: Conversation) -> None:
         self.session.add(conversation)
-

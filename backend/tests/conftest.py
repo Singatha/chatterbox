@@ -10,7 +10,7 @@ from app.main import app
 
 
 @pytest.fixture
-async def session() -> AsyncGenerator[AsyncSession, None]:
+async def session_factory() -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         connect_args={"check_same_thread": False},
@@ -19,11 +19,17 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield factory
+    await engine.dispose()
+
+
+@pytest.fixture
+async def session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncGenerator[AsyncSession, None]:
     async with session_factory() as test_session:
         yield test_session
-
-    await engine.dispose()
 
 
 @pytest.fixture
@@ -46,4 +52,3 @@ def user_payload() -> dict[str, str]:
         "email": "alice@example.com",
         "password": "correct-horse-battery-staple",
     }
-
