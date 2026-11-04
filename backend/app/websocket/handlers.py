@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.errors import AppError
 from app.repositories.conversation_repository import ConversationRepository
@@ -90,18 +91,24 @@ async def handle_typing(
         member_ids = await ConversationRepository(session).member_ids(event.conversation_id)
 
     data = TypingEventData(conversation_id=event.conversation_id, user_id=user_id)
+    stopped_event = TypingStoppedEvent(data=data).model_dump(mode="json")
     if isinstance(event, TypingStartEvent):
-        stopped_event = TypingStoppedEvent(data=data).model_dump(mode="json")
-
-        async def expire() -> None:
-            await manager.send_to_users(member_ids, stopped_event, exclude_user_id=user_id)
-
-        await tracker.start(event.conversation_id, user_id, expire)
-        outgoing = TypingStartedEvent(data=data).model_dump(mode="json")
+        await manager.typing_start(
+            event.conversation_id,
+            user_id,
+            member_ids,
+            TypingStartedEvent(data=data).model_dump(mode="json"),
+            stopped_event,
+            tracker,
+        )
     else:
-        await tracker.stop(event.conversation_id, user_id)
-        outgoing = TypingStoppedEvent(data=data).model_dump(mode="json")
-    await manager.send_to_users(member_ids, outgoing, exclude_user_id=user_id)
+        await manager.typing_stop(
+            event.conversation_id,
+            user_id,
+            member_ids,
+            stopped_event,
+            tracker,
+        )
 
 
 async def dispatch_event(
@@ -115,10 +122,31 @@ async def dispatch_event(
     try:
         event = client_event_adapter.validate_python(payload)
         if isinstance(event, MessageSendEvent):
+            if not await manager.allow_action(
+                user_id,
+                "message.send",
+                settings.message_send_rate_limit,
+                settings.realtime_rate_limit_window_seconds,
+            ):
+                raise AppError(429, "RATE_LIMITED", "Too many messages; please slow down")
             await handle_message_send(event, user_id, manager, session_factory)
         elif isinstance(event, MessageReadRequest):
+            if not await manager.allow_action(
+                user_id,
+                "message.read",
+                settings.receipt_rate_limit,
+                settings.realtime_rate_limit_window_seconds,
+            ):
+                raise AppError(429, "RATE_LIMITED", "Too many receipt updates")
             await handle_message_read(event, user_id, manager, session_factory)
         elif isinstance(event, (TypingStartEvent, TypingStopEvent)):
+            if not await manager.allow_action(
+                user_id,
+                "typing",
+                settings.typing_rate_limit,
+                settings.realtime_rate_limit_window_seconds,
+            ):
+                raise AppError(429, "RATE_LIMITED", "Too many typing updates")
             await handle_typing(event, user_id, manager, tracker, session_factory)
     except ValidationError:
         await manager.send_to_user(

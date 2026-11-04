@@ -51,6 +51,15 @@ services:
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
       CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:3000","http://localhost:5173"]}'
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_REQUIRED: ${REDIS_REQUIRED:-true}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-chatterbox}
+      PRESENCE_TTL_SECONDS: ${PRESENCE_TTL_SECONDS:-30}
+      PRESENCE_HEARTBEAT_SECONDS: ${PRESENCE_HEARTBEAT_SECONDS:-10}
+      TYPING_TTL_SECONDS: ${TYPING_TTL_SECONDS:-5}
+      REALTIME_RATE_LIMIT_WINDOW_SECONDS: ${REALTIME_RATE_LIMIT_WINDOW_SECONDS:-60}
+      MESSAGE_SEND_RATE_LIMIT: ${MESSAGE_SEND_RATE_LIMIT:-30}
+      TYPING_RATE_LIMIT: ${TYPING_RATE_LIMIT:-120}
+      RECEIPT_RATE_LIMIT: ${RECEIPT_RATE_LIMIT:-120}
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,8 +70,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    expose:
+      - "8000"
+
+  gateway:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
     ports:
-      - "8000:8000"
+      - "8000:80"
 
   frontend:
     build:
@@ -70,8 +89,8 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     depends_on:
-      backend:
-        condition: service_healthy
+      gateway:
+        condition: service_started
     ports:
       - "3000:80"
 
