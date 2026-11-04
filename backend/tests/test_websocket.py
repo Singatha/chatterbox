@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -269,4 +270,32 @@ async def test_invalid_event_returns_typed_error() -> None:
         "type": "error",
         "request_id": "bad-1",
         "error": {"code": "INVALID_EVENT", "message": "WebSocket event is invalid"},
+    }
+
+
+async def test_rate_limited_event_returns_typed_error() -> None:
+    user_id = uuid4()
+    socket = FakeWebSocket()
+    manager = ConnectionManager()
+    await manager.connect(user_id, socket)  # type: ignore[arg-type]
+    manager.allow_action = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    await dispatch_event(
+        {
+            "type": "message.send",
+            "request_id": "limited-1",
+            "conversation_id": str(uuid4()),
+            "content": "one too many",
+        },
+        user_id,
+        manager,
+    )
+
+    assert socket.events[-1] == {
+        "type": "error",
+        "request_id": "limited-1",
+        "error": {
+            "code": "RATE_LIMITED",
+            "message": "Too many messages; please slow down",
+        },
     }

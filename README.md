@@ -1,8 +1,8 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository currently contains the **single-instance realtime chat release**: an asynchronous FastAPI API backed by PostgreSQL, secure token-based authentication, direct conversations, persisted message history and receipts, presence, typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository contains the **horizontally scalable realtime release**: asynchronous FastAPI instances backed by PostgreSQL and Redis, secure token-based authentication, direct conversations, persisted message history and receipts, distributed presence and typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
 
-Realtime delivery currently uses an in-process connection manager. Redis and MinIO are included in the local stack so the infrastructure contract is stable, but application code does not use them yet.
+Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub routes user-targeted events across instances, while expiring Redis leases coordinate global presence and typing state. PostgreSQL remains the source of truth for users, conversations, messages, receipts, unread counts, and `last_seen`.
 
 ## Foundation features
 
@@ -24,6 +24,9 @@ Realtime delivery currently uses an in-process connection manager. Redis and Min
 - First/last-socket presence transitions with durable `last_seen` timestamps
 - Automatic delivery acknowledgement when an online recipient receives a message
 - Expiring typing indicators that cannot remain stuck indefinitely
+- Redis Pub/Sub delivery across multiple FastAPI instances
+- Crash-tolerant presence leases and globally coordinated typing expiry
+- Redis-backed rate limits shared by every backend instance
 - Automatic reconnect with exponential backoff up to 30 seconds
 - Post-cursor REST recovery for messages missed while disconnected
 - Consistent API error envelopes without sensitive fields
@@ -38,17 +41,17 @@ Realtime delivery currently uses an in-process connection manager. Redis and Min
 
 ```mermaid
 flowchart LR
-    Browser[React + Ant Design] -->|REST / JSON| API[FastAPI routes]
-    API --> Services[Application services]
-    Services --> Repos[Repositories]
-    Repos --> DB[(PostgreSQL)]
-    Browser <-->|Typed realtime events| WS[WebSocket gateway]
-    WS --> Services
-    WS -. scale-out phase .-> Redis[(Redis Pub/Sub)]
-    Services -. attachment phase .-> MinIO[(MinIO)]
+    Browser[React + Ant Design] <-->|REST + WebSockets| Gateway[Nginx gateway]
+    Gateway --> API1[FastAPI instance 1]
+    Gateway --> API2[FastAPI instance 2]
+    API1 <-->|Pub/Sub + leases| Redis[(Redis)]
+    API2 <-->|Pub/Sub + leases| Redis
+    API1 --> DB[(PostgreSQL)]
+    API2 --> DB
+    API1 -. attachment phase .-> MinIO[(MinIO)]
 ```
 
-The backend is a layered modular monolith. Routes handle HTTP concerns, services own business transactions, repositories contain database queries, schemas define external contracts, and SQLAlchemy models define persistence. PostgreSQL is the source of truth; ephemeral delivery state will live in Redis only after the single-instance realtime path works.
+The backend is a layered modular monolith. Routes handle HTTP concerns, services own business transactions, repositories contain database queries, schemas define external contracts, and SQLAlchemy models define persistence. Redis contains only recoverable coordination state; a Redis outage never changes the durable message model.
 
 ## Technology stack
 
@@ -74,6 +77,12 @@ Replace `JWT_SECRET` and the development passwords in `.env`, then run:
 
 ```bash
 docker compose up --build
+```
+
+To run two backend replicas behind the included gateway:
+
+```bash
+docker compose up --build --scale backend=2
 ```
 
 Open:
@@ -118,7 +127,16 @@ The Vite app runs at <http://localhost:5173> and calls `http://localhost:8000` b
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Access-token lifetime | `15` |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | Refresh-token lifetime | `7` |
 | `CORS_ORIGINS` | JSON array of allowed browser origins | Ports `3000` and `5173` |
-| `REDIS_URL` | Reserved for realtime scale-out | `redis://redis:6379/0` |
+| `REDIS_URL` | Pub/Sub, presence, typing, and rate-limit store | `redis://redis:6379/0` |
+| `REDIS_REQUIRED` | Fail startup when Redis is unavailable | `true` in Compose |
+| `REDIS_KEY_PREFIX` | Namespace for shared Redis keys | `chatterbox` |
+| `PRESENCE_TTL_SECONDS` | Lifetime of an instance's presence lease | `30` |
+| `PRESENCE_HEARTBEAT_SECONDS` | Presence lease refresh interval | `10` |
+| `TYPING_TTL_SECONDS` | Maximum lifetime of a typing state | `5` |
+| `REALTIME_RATE_LIMIT_WINDOW_SECONDS` | Shared realtime rate-limit window | `60` |
+| `MESSAGE_SEND_RATE_LIMIT` | Messages allowed per user/window | `30` |
+| `TYPING_RATE_LIMIT` | Typing updates allowed per user/window | `120` |
+| `RECEIPT_RATE_LIMIT` | Read updates allowed per user/window | `120` |
 | `MINIO_ROOT_USER` | Local object-storage administrator | `minioadmin` |
 | `MINIO_ROOT_PASSWORD` | Local object-storage password | Development-only value |
 | `VITE_API_URL` | Browser-visible API base URL | `http://localhost:8000` |
@@ -255,11 +273,13 @@ The browser reconnects with exponential backoff. After a successful reconnection
 - **Subprotocol authentication:** access tokens are carried in `Sec-WebSocket-Protocol`, avoiding query-string token leakage. A future cookie-based deployment can replace this without changing event payloads.
 - **Persist then publish:** `message.send` reuses the same authorization and persistence service as REST. A failed transaction never produces `message.created`.
 - **PostgreSQL as source of truth:** a message is delivered as a durable event only after it has been authorized and persisted. Redis will never be the canonical message store.
-- **Durable receipts, ephemeral activity:** delivered/read timestamps and `last_seen` live in PostgreSQL. Active sockets and typing expiry timers are intentionally process-local until the scale-out increment.
-- **Multi-tab presence semantics:** only a user's first connection emits online and only their last disconnection records `last_seen` and emits offline.
+- **Durable receipts, ephemeral activity:** delivered/read timestamps and `last_seen` live in PostgreSQL. Redis stores only replaceable Pub/Sub messages, leases, typing expirations, and rate-limit counters.
+- **Distributed presence semantics:** sorted-set leases represent each instance serving a user. Only the first global connection emits online, and only the last global disconnection emits offline. A surviving instance detects expired crash leases.
+- **Distributed typing expiry:** Redis stores typing deadlines and event targets. Atomic claiming ensures exactly one surviving instance publishes the expiry event.
+- **Graceful degradation:** non-required local development can fall back to in-process routing when Redis is unavailable. Compose and production-style deployments set `REDIS_REQUIRED=true`.
 - **Refresh rotation:** server-side token records make logout and replay prevention possible without storing raw tokens.
 - **UUID identifiers:** IDs can be created safely across future application instances without relying on a central sequence.
-- **Redis is deliberately idle today:** the MVP should prove one-process connection management first. In the scale-out phase, instances will publish user-targeted events so recipients connected to a different process receive them.
+- **Redis is not canonical:** Pub/Sub can be lossy by design because cursor recovery closes message gaps after reconnect. PostgreSQL remains authoritative.
 - **Ordering and recovery:** the message phase will order history by `(created_at, id)` and use that pair as an opaque cursor. Reconnecting clients will request records after their last durable cursor, covering gaps during disconnects.
 
 ## Project structure
@@ -269,6 +289,7 @@ The browser reconnects with exponential backoff. After a successful reconnection
 ├── .github/workflows/ci.yml
 ├── .env.example
 ├── docker-compose.yml
+├── gateway/nginx.conf            # REST and WebSocket load-balancing gateway
 ├── backend
 │   ├── alembic/
 │   │   ├── env.py
@@ -299,4 +320,4 @@ The browser reconnects with exponential backoff. After a successful reconnection
 
 ## Next increment
 
-Introduce Redis Pub/Sub and expiring presence keys so user-targeted events and activity state work across multiple backend instances. PostgreSQL remains authoritative for messages, receipts, unread counts, and `last_seen`.
+Add message attachments backed by MinIO: presigned uploads, file metadata validation, authorization-aware downloads, attachment rendering, and cleanup of abandoned objects.

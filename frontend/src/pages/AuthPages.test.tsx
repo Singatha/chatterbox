@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { expect, test } from 'vitest'
 import { LoginPage } from './LoginPage'
@@ -13,6 +13,7 @@ test('login page validates required fields', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
   expect(await screen.findByText('Enter your email or username')).toBeInTheDocument()
   expect(await screen.findByText('Enter your password')).toBeInTheDocument()
+  await act(() => new Promise((resolve) => setTimeout(resolve, 25)))
 })
 
 test('registration page exposes account fields', () => {

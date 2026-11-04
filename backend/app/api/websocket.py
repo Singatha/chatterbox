@@ -1,6 +1,5 @@
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -9,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.database import get_session_factory
 from app.models.user import User
 from app.repositories.conversation_repository import ConversationRepository
-from app.repositories.user_repository import UserRepository
+from app.services.presence_service import mark_user_offline
 from app.services.receipt_service import ReceiptService
 from app.websocket.auth import get_websocket_user
 from app.websocket.events import (
@@ -18,8 +17,6 @@ from app.websocket.events import (
     ErrorDetail,
     ErrorEvent,
     MessageDeliveredEvent,
-    PresenceOfflineData,
-    PresenceOfflineEvent,
     PresenceOnlineData,
     PresenceOnlineEvent,
 )
@@ -95,19 +92,5 @@ async def websocket_endpoint(
     finally:
         became_offline = await manager.disconnect(current_user.id, websocket)
         if became_offline:
-            last_seen = datetime.now(timezone.utc)
-            async with session_factory() as session:
-                await UserRepository(session).set_last_seen(current_user.id, last_seen)
-                peer_ids = await ConversationRepository(session).peer_ids(current_user.id)
-                await session.commit()
-            await manager.send_to_users(
-                peer_ids,
-                PresenceOfflineEvent(
-                    data=PresenceOfflineData(
-                        user_id=current_user.id,
-                        last_seen=last_seen.isoformat(),
-                    )
-                ).model_dump(mode="json"),
-                exclude_user_id=current_user.id,
-            )
+            await mark_user_offline(current_user.id, manager, session_factory)
         logger.info("WebSocket disconnected", extra={"user_id": str(current_user.id)})
