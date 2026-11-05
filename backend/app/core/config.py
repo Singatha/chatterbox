@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal, Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,6 +39,15 @@ class Settings(BaseSettings):
     attachment_upload_expire_minutes: int = Field(default=15, ge=1, le=60)
     attachment_pending_ttl_hours: int = Field(default=24, ge=1)
     attachment_cleanup_interval_seconds: int = Field(default=3600, ge=60)
+    log_level: str = "INFO"
+    otel_service_name: str = "chatterbox-api"
+    otel_exporter_otlp_traces_endpoint: Optional[str] = None
+    otel_export_timeout_seconds: float = Field(default=5.0, gt=0)
+    health_check_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
+    attachment_scan_mode: Literal["disabled", "clamav"] = "disabled"
+    clamav_host: str = "localhost"
+    clamav_port: int = Field(default=3310, ge=1, le=65535)
+    clamav_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
 
     @model_validator(mode="after")
     def validate_realtime_intervals(self) -> "Settings":

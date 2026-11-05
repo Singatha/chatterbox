@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import CurrentUser, DbSession
+from app.core.scanning import AttachmentScanner, get_attachment_scanner
 from app.core.storage import ObjectStorage, get_object_storage
 from app.schemas.attachment import (
     AttachmentReserveRequest,
@@ -17,6 +18,7 @@ from app.services.attachment_service import AttachmentService
 
 router = APIRouter(tags=["attachments"])
 Storage = Annotated[ObjectStorage, Depends(get_object_storage)]
+Scanner = Annotated[AttachmentScanner, Depends(get_attachment_scanner)]
 
 
 @router.post(
@@ -49,8 +51,9 @@ async def complete_attachment(
     session: DbSession,
     current_user: CurrentUser,
     storage: Storage,
+    scanner: Scanner,
 ) -> AttachmentResponse:
-    return await AttachmentService(session, storage).complete(
+    return await AttachmentService(session, storage, scanner).complete(
         attachment_id, current_user.id
     )
 

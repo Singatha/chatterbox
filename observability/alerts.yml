@@ -1,0 +1,45 @@
+groups:
+  - name: chatterbox-api
+    rules:
+      - alert: ChatterboxApiInstanceDown
+        expr: up{job="chatterbox-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Chatterbox API instance is unavailable
+          description: Prometheus has failed to scrape an API instance for two minutes.
+
+      - alert: ChatterboxHighErrorRate
+        expr: |
+          sum(rate(chatterbox_http_requests_total{status_code=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(chatterbox_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Chatterbox API error rate is above 5%
+          description: More than 5% of API responses have been 5xx responses for ten minutes.
+
+      - alert: ChatterboxHighLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(chatterbox_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Chatterbox API p95 latency is above one second
+          description: The API p95 request latency has remained above one second for ten minutes.
+
+      - alert: ChatterboxAttachmentScannerUnavailable
+        expr: increase(chatterbox_attachment_scans_total{outcome="unavailable"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Attachment malware scanner is unavailable
+          description: At least one attachment scan could not reach the configured scanner.

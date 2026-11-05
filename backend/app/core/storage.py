@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from anyio import to_thread
 from minio import Minio
+from minio.commonconfig import CopySource
 from minio.error import S3Error
 
 from app.core.config import settings
@@ -13,6 +14,11 @@ from app.core.config import settings
 class StoredObjectMetadata:
     size: int
     content_type: str
+    etag: str
+
+
+class ObjectChangedError(Exception):
+    pass
 
 
 class ObjectStorage:
@@ -40,6 +46,9 @@ class ObjectStorage:
         if not exists:
             await to_thread.run_sync(self._internal.make_bucket, self.bucket)
 
+    async def healthcheck(self) -> bool:
+        return await to_thread.run_sync(self._internal.bucket_exists, self.bucket)
+
     async def presigned_put(self, storage_key: str, expires: timedelta) -> str:
         return await to_thread.run_sync(
             self._public.presigned_put_object,
@@ -60,7 +69,24 @@ class ObjectStorage:
         return StoredObjectMetadata(
             size=result.size,
             content_type=result.content_type or "application/octet-stream",
+            etag=result.etag,
         )
+
+    async def copy_if_unchanged(
+        self, source_key: str, destination_key: str, etag: str
+    ) -> None:
+        source = CopySource(self.bucket, source_key, match_etag=etag)
+        try:
+            await to_thread.run_sync(
+                self._internal.copy_object,
+                self.bucket,
+                destination_key,
+                source,
+            )
+        except S3Error as exc:
+            if exc.code in {"PreconditionFailed", "InvalidRequest"}:
+                raise ObjectChangedError from exc
+            raise
 
     async def get(self, storage_key: str) -> Any:
         return await to_thread.run_sync(

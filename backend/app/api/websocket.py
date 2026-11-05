@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.database import get_session_factory
+from app.core.observability import WEBSOCKET_CONNECTIONS
 from app.models.user import User
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.presence_service import mark_user_offline
@@ -36,6 +37,7 @@ async def websocket_endpoint(
     ],
 ) -> None:
     became_online = await manager.connect(current_user.id, websocket)
+    WEBSOCKET_CONNECTIONS.inc()
     try:
         logger.info("WebSocket connected", extra={"user_id": str(current_user.id)})
         async with session_factory() as session:
@@ -90,6 +92,7 @@ async def websocket_endpoint(
     except (WebSocketDisconnect, RuntimeError, ValueError):
         pass
     finally:
+        WEBSOCKET_CONNECTIONS.dec()
         became_offline = await manager.disconnect(current_user.id, websocket)
         if became_offline:
             await mark_user_offline(current_user.id, manager, session_factory)

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.errors import AppError
+from app.core.observability import WEBSOCKET_EVENTS_TOTAL
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.message_service import MessageService
 from app.services.receipt_service import ReceiptService
@@ -122,6 +123,12 @@ async def dispatch_event(
     tracker: TypingTracker = typing_tracker,
 ) -> None:
     request_id = payload.get("request_id") if isinstance(payload, dict) else None
+    raw_event_type = payload.get("type") if isinstance(payload, dict) else None
+    event_type = (
+        raw_event_type
+        if raw_event_type in {"message.send", "message.read", "typing.start", "typing.stop"}
+        else "unknown"
+    )
     try:
         event = client_event_adapter.validate_python(payload)
         if isinstance(event, MessageSendEvent):
@@ -151,7 +158,9 @@ async def dispatch_event(
             ):
                 raise AppError(429, "RATE_LIMITED", "Too many typing updates")
             await handle_typing(event, user_id, manager, tracker, session_factory)
+        WEBSOCKET_EVENTS_TOTAL.labels(event_type=event_type, outcome="accepted").inc()
     except ValidationError:
+        WEBSOCKET_EVENTS_TOTAL.labels(event_type=event_type, outcome="invalid").inc()
         await manager.send_to_user(
             user_id,
             ErrorEvent(
@@ -160,6 +169,7 @@ async def dispatch_event(
             ).model_dump(mode="json"),
         )
     except AppError as exc:
+        WEBSOCKET_EVENTS_TOTAL.labels(event_type=event_type, outcome="rejected").inc()
         await manager.send_to_user(
             user_id,
             ErrorEvent(
@@ -168,6 +178,7 @@ async def dispatch_event(
             ).model_dump(mode="json"),
         )
     except Exception:
+        WEBSOCKET_EVENTS_TOTAL.labels(event_type=event_type, outcome="error").inc()
         logger.exception("Unexpected WebSocket event failure", extra={"user_id": str(user_id)})
         await manager.send_to_user(
             user_id,
