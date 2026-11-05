@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { chatApi } from '../api/chat'
@@ -14,6 +14,8 @@ vi.mock('../api/chat', () => ({
     searchUsers: vi.fn(),
     createDirect: vi.fn(),
     sendMessage: vi.fn(),
+    uploadAttachment: vi.fn(),
+    downloadAttachment: vi.fn(),
   },
 }))
 
@@ -42,6 +44,7 @@ const conversation = {
 }
 
 beforeEach(() => {
+  cleanup()
   useAuthStore.getState().setSession({
     access_token: 'access-token',
     refresh_token: 'refresh-token',
@@ -68,11 +71,20 @@ beforeEach(() => {
         edited_at: null,
         cursor: 'cursor-1',
         receipts: [{ user_id: 'user-1', delivered_at: null, read_at: null }],
+        attachments: [],
       },
     ],
     next_cursor: null,
   })
   vi.mocked(chatApi.searchUsers).mockResolvedValue([])
+  vi.mocked(chatApi.uploadAttachment).mockResolvedValue({
+    id: 'attachment-1',
+    filename: 'notes.txt',
+    mime_type: 'text/plain',
+    file_size: 5,
+    uploaded_at: '2026-09-05T12:01:30Z',
+    download_url: '/attachments/attachment-1/download',
+  })
   vi.mocked(chatApi.sendMessage).mockResolvedValue({
     id: 'message-2',
     conversation_id: conversation.id,
@@ -83,10 +95,13 @@ beforeEach(() => {
     edited_at: null,
     cursor: 'cursor-2',
     receipts: [{ user_id: 'user-2', delivered_at: null, read_at: null }],
+    attachments: [],
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+  cleanup()
   useAuthStore.getState().clearSession()
   vi.clearAllMocks()
 })
@@ -106,6 +121,32 @@ test('loads a conversation and sends a persisted message', async () => {
       'access-token',
       conversation.id,
       'Hi Bob',
+      [],
+    )
+  })
+})
+
+test('uploads an attachment before sending its message', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(<QueryClientProvider client={client}><ChatPage /></QueryClientProvider>)
+  await screen.findByText('Hello Alice')
+  const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
+
+  await userEvent.upload(screen.getByLabelText('Choose attachments'), file)
+  expect(await screen.findByText('notes.txt')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+  await waitFor(() => {
+    expect(chatApi.uploadAttachment).toHaveBeenCalledWith(
+      'access-token',
+      conversation.id,
+      file,
+    )
+    expect(chatApi.sendMessage).toHaveBeenCalledWith(
+      'access-token',
+      conversation.id,
+      '',
+      ['attachment-1'],
     )
   })
 })

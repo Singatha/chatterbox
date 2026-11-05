@@ -93,7 +93,7 @@ class ConversationService:
                 id=latest.id,
                 sender_id=latest.sender_id,
                 sender_username=latest.sender.username,
-                content=latest.content,
+                content=latest.content or ("📎 Attachment" if latest.attachments else ""),
                 created_at=latest.created_at,
             )
         return ConversationResponse(

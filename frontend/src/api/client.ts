@@ -15,7 +15,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
+export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -39,6 +39,24 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     return undefined as T
   }
   return response.json() as Promise<T>
+}
+
+export async function authorizedBlobRequest(
+  path: string,
+  accessToken: string,
+): Promise<Blob> {
+  const response = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as ApiErrorBody
+    throw new ApiError(
+      body.error?.message ?? 'File could not be downloaded.',
+      response.status,
+      body.error?.code ?? 'DOWNLOAD_FAILED',
+    )
+  }
+  return response.blob()
 }
 
 export function authorizedRequest<T>(

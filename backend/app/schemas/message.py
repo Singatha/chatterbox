@@ -2,19 +2,23 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.schemas.attachment import AttachmentResponse
 
 
 class MessageCreate(BaseModel):
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(default="", max_length=4000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Message cannot be blank")
-        return value
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "MessageCreate":
+        self.content = self.content.strip()
+        if not self.content and not self.attachment_ids:
+            raise ValueError("Message must contain text or an attachment")
+        if len(set(self.attachment_ids)) != len(self.attachment_ids):
+            raise ValueError("Attachment IDs must be unique")
+        return self
 
 
 class MessageReceiptResponse(BaseModel):
@@ -37,6 +41,7 @@ class MessageResponse(BaseModel):
     edited_at: Optional[datetime]
     cursor: str
     receipts: list[MessageReceiptResponse]
+    attachments: list[AttachmentResponse]
 
 
 class MessagePage(BaseModel):

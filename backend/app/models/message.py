@@ -40,3 +40,6 @@ class Message(Base):
     receipts: Mapped[list["MessageReceipt"]] = relationship(  # noqa: F821, UP037
         back_populates="message", cascade="all, delete-orphan", lazy="selectin"
     )
+    attachments: Mapped[list["Attachment"]] = relationship(  # noqa: F821, UP037
+        back_populates="message", cascade="all, delete-orphan", lazy="selectin"
+    )

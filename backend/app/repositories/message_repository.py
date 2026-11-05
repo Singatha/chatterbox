@@ -22,7 +22,11 @@ class MessageRepository:
         result = await self.session.execute(
             select(Message)
             .where(Message.id == message_id)
-            .options(joinedload(Message.sender), selectinload(Message.receipts))
+            .options(
+                joinedload(Message.sender),
+                selectinload(Message.receipts),
+                selectinload(Message.attachments),
+            )
         )
         return result.scalar_one_or_none()
 
@@ -32,6 +36,7 @@ class MessageRepository:
             .where(Message.conversation_id == conversation_id, Message.deleted_at.is_(None))
             .options(joinedload(Message.sender))
             .options(selectinload(Message.receipts))
+            .options(selectinload(Message.attachments))
             .order_by(Message.created_at.desc(), Message.id.desc())
             .limit(1)
         )
@@ -49,6 +54,7 @@ class MessageRepository:
             .where(Message.conversation_id == conversation_id, Message.deleted_at.is_(None))
             .options(joinedload(Message.sender))
             .options(selectinload(Message.receipts))
+            .options(selectinload(Message.attachments))
         )
         if before_created_at is not None and before_id is not None:
             statement = statement.where(
@@ -81,6 +87,7 @@ class MessageRepository:
             )
             .options(joinedload(Message.sender))
             .options(selectinload(Message.receipts))
+            .options(selectinload(Message.attachments))
             .order_by(Message.created_at, Message.id)
             .limit(limit + 1)
         )
