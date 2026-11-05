@@ -66,11 +66,12 @@ test('authenticates, emits message events, and validates server frames', () => {
   expect(socket.protocols).toEqual(['access_token', 'signed-token'])
   socket.open()
 
-  expect(client.sendMessage('conversation-1', 'Hello')).toBe(true)
+  expect(client.sendMessage('conversation-1', 'Hello', ['attachment-1'])).toBe(true)
   expect(JSON.parse(socket.sent[0])).toMatchObject({
     type: 'message.send',
     conversation_id: 'conversation-1',
     content: 'Hello',
+    attachment_ids: ['attachment-1'],
   })
   expect(client.sendTyping('conversation-1', true)).toBe(true)
   expect(client.markRead('conversation-1', 'message-1')).toBe(true)
@@ -131,6 +132,7 @@ test('realtime store deduplicates messages by durable id', () => {
     edited_at: null,
     cursor: 'cursor-1',
     receipts: [],
+    attachments: [],
   }
   useChatStore.getState().addRealtimeMessage(message)
   useChatStore.getState().addRealtimeMessage(message)

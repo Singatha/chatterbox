@@ -7,11 +7,14 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.errors import AppError
 from app.models.message import Message
 from app.models.message_receipt import MessageReceipt
+from app.repositories.attachment_repository import AttachmentRepository
 from app.repositories.message_repository import MessageRepository
 from app.schemas.message import MessagePage, MessageResponse
+from app.services.attachment_service import AttachmentService
 from app.services.conversation_service import ConversationService
 
 
@@ -40,17 +43,43 @@ class MessageService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.messages = MessageRepository(session)
+        self.attachments = AttachmentRepository(session)
         self.conversation_service = ConversationService(session)
 
     async def create(
-        self, conversation_id: UUID, sender_id: UUID, content: str
+        self,
+        conversation_id: UUID,
+        sender_id: UUID,
+        content: str,
+        attachment_ids: Optional[list[UUID]] = None,
     ) -> MessageResponse:
         conversation = await self.conversation_service.get_authorized(conversation_id, sender_id)
+        attachment_ids = attachment_ids or []
+        if not content.strip() and not attachment_ids:
+            raise AppError(422, "EMPTY_MESSAGE", "Message must contain text or an attachment")
+        if len(attachment_ids) > settings.attachment_max_per_message:
+            raise AppError(422, "TOO_MANY_ATTACHMENTS", "Message has too many attachments")
+        if len(set(attachment_ids)) != len(attachment_ids):
+            raise AppError(422, "DUPLICATE_ATTACHMENTS", "Attachment IDs must be unique")
+        attachments = await self.attachments.lock_for_message(attachment_ids)
+        attachments_by_id = {attachment.id: attachment for attachment in attachments}
+        if len(attachments_by_id) != len(attachment_ids):
+            raise AppError(422, "INVALID_ATTACHMENTS", "One or more attachments are invalid")
+        ordered_attachments = [attachments_by_id[item_id] for item_id in attachment_ids]
+        if any(
+            attachment.conversation_id != conversation_id
+            or attachment.uploader_id != sender_id
+            or attachment.uploaded_at is None
+            or attachment.message_id is not None
+            for attachment in ordered_attachments
+        ):
+            raise AppError(422, "INVALID_ATTACHMENTS", "One or more attachments are invalid")
         message = Message(
             conversation_id=conversation_id,
             sender_id=sender_id,
-            content=content,
+            content=content.strip(),
         )
+        message.attachments = ordered_attachments
         message.receipts = [
             MessageReceipt(user_id=member.user_id)
             for member in conversation.members
@@ -114,4 +143,8 @@ class MessageService:
             edited_at=message.edited_at,
             cursor=encode_cursor(message),
             receipts=message.receipts,
+            attachments=[
+                AttachmentService.to_response(attachment)
+                for attachment in message.attachments
+            ],
         )

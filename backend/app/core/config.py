@@ -24,6 +24,20 @@ class Settings(BaseSettings):
     message_send_rate_limit: int = Field(default=30, ge=1)
     typing_rate_limit: int = Field(default=120, ge=1)
     receipt_rate_limit: int = Field(default=120, ge=1)
+    minio_endpoint: str = "localhost:9000"
+    minio_public_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minio_dev_password"
+    minio_secure: bool = False
+    minio_public_secure: bool = False
+    minio_bucket: str = "chat-attachments"
+    minio_region: str = "us-east-1"
+    minio_required: bool = False
+    attachment_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    attachment_max_per_message: int = Field(default=5, ge=1, le=10)
+    attachment_upload_expire_minutes: int = Field(default=15, ge=1, le=60)
+    attachment_pending_ttl_hours: int = Field(default=24, ge=1)
+    attachment_cleanup_interval_seconds: int = Field(default=3600, ge=60)
 
     @model_validator(mode="after")
     def validate_realtime_intervals(self) -> "Settings":

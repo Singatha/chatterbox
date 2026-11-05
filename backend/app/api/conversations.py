@@ -61,5 +61,5 @@ async def create_message(
     current_user: CurrentUser,
 ) -> MessageResponse:
     return await MessageService(session).create(
-        conversation_id, current_user.id, data.content
+        conversation_id, current_user.id, data.content, data.attachment_ids
     )

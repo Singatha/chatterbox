@@ -1,7 +1,7 @@
 from typing import Literal, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
 
 from app.schemas.message import MessageResponse
 from app.schemas.receipt import ReceiptEventData
@@ -11,15 +11,17 @@ class MessageSendEvent(BaseModel):
     type: Literal["message.send"]
     request_id: Optional[str] = Field(default=None, max_length=64)
     conversation_id: UUID
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(default="", max_length=4000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
-    @field_validator("content")
-    @classmethod
-    def reject_blank_content(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Message cannot be blank")
-        return value
+    @model_validator(mode="after")
+    def require_content_or_attachment(self) -> "MessageSendEvent":
+        self.content = self.content.strip()
+        if not self.content and not self.attachment_ids:
+            raise ValueError("Message must contain text or an attachment")
+        if len(set(self.attachment_ids)) != len(self.attachment_ids):
+            raise ValueError("Attachment IDs must be unique")
+        return self
 
 
 class MessageReadRequest(BaseModel):

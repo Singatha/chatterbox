@@ -43,12 +43,17 @@ export class RealtimeClient {
     this.options.onStatus('disconnected')
   }
 
-  sendMessage(conversationId: string, content: string): boolean {
+  sendMessage(
+    conversationId: string,
+    content: string,
+    attachmentIds: string[] = [],
+  ): boolean {
     const event: MessageSendEvent = {
       type: 'message.send',
       request_id: crypto.randomUUID(),
       conversation_id: conversationId,
       content,
+      attachment_ids: attachmentIds,
     }
     return this.sendEvent(event)
   }

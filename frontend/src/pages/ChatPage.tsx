@@ -1,6 +1,10 @@
 import {
+  CloseOutlined,
+  DownloadOutlined,
+  FileOutlined,
   LogoutOutlined,
   MessageOutlined,
+  PaperClipOutlined,
   PlusOutlined,
   SearchOutlined,
   SendOutlined,
@@ -17,6 +21,82 @@ import type { ErrorEvent } from '../realtime/events'
 import { useAuthStore } from '../stores/authStore'
 import { useChatStore } from '../stores/chatStore'
 import { conversationTitle, initials } from '../utils/chat'
+import type { Attachment } from '../types/chat'
+
+const ALLOWED_ATTACHMENT_TYPES = new Set([
+  'application/pdf',
+  'application/zip',
+  'image/gif',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'text/plain',
+])
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_ATTACHMENTS = 5
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function AttachmentView({
+  attachment,
+  accessToken,
+}: {
+  attachment: Attachment
+  accessToken: string
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const isImage = attachment.mime_type.startsWith('image/')
+
+  useEffect(() => {
+    if (!isImage) return
+    let active = true
+    let objectUrl: string | null = null
+    void chatApi.downloadAttachment(accessToken, attachment).then((blob) => {
+      if (!active) return
+      objectUrl = URL.createObjectURL(blob)
+      setPreviewUrl(objectUrl)
+    })
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [accessToken, attachment, isImage])
+
+  const download = async () => {
+    setLoading(true)
+    try {
+      const blob = await chatApi.downloadAttachment(accessToken, attachment)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = attachment.filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      void message.error(error instanceof ApiError ? error.message : 'File could not be downloaded')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <button className={`attachment-card ${isImage ? 'image' : ''}`} type="button" onClick={() => void download()}>
+      {isImage && previewUrl
+        ? <img src={previewUrl} alt={attachment.filename} />
+        : <span className="attachment-icon">{loading ? <Spin size="small" /> : <FileOutlined />}</span>}
+      <span className="attachment-copy">
+        <strong>{attachment.filename}</strong>
+        <small>{formatFileSize(attachment.file_size)}</small>
+      </span>
+      <DownloadOutlined />
+    </button>
+  )
+}
 
 function lastSeenLabel(value: string | null): string {
   if (!value) return 'Offline'
@@ -44,6 +124,9 @@ export function ChatPage() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [draft, setDraft] = useState('')
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const typingConversationRef = useRef<string | null>(null)
   const lastReadRef = useRef<string | null>(null)
@@ -141,15 +224,16 @@ export function ChatPage() {
   })
 
   const sendMessage = useMutation({
-    mutationFn: (content: string) => chatApi.sendMessage(accessToken ?? '', selectedId!, content),
+    mutationFn: ({ content, attachmentIds }: { content: string; attachmentIds: string[] }) =>
+      chatApi.sendMessage(accessToken ?? '', selectedId!, content, attachmentIds),
     onSuccess: async () => {
       setDraft('')
+      setPendingFiles([])
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['messages', selectedId] }),
         queryClient.invalidateQueries({ queryKey: ['conversations'] }),
       ])
     },
-    onError: (error) => void message.error(error instanceof ApiError ? error.message : 'Message could not be sent'),
   })
 
   const logout = useMutation({
@@ -164,15 +248,44 @@ export function ChatPage() {
 
   if (!user || !accessToken) return null
 
-  const submitMessage = () => {
+  const submitMessage = async () => {
     const content = draft.trim()
-    if (!content || !selectedId || sendMessage.isPending) return
+    if ((!content && pendingFiles.length === 0) || !selectedId || sendMessage.isPending || uploading) return
     stopTyping()
-    if (realtimeStatus === 'connected' && sendRealtimeMessage(selectedId, content)) {
-      setDraft('')
-      return
+    setUploading(true)
+    try {
+      const attachments = await Promise.all(
+        pendingFiles.map((file) => chatApi.uploadAttachment(accessToken, selectedId, file)),
+      )
+      const attachmentIds = attachments.map((attachment) => attachment.id)
+      if (realtimeStatus === 'connected'
+        && sendRealtimeMessage(selectedId, content, attachmentIds)) {
+        setDraft('')
+        setPendingFiles([])
+        return
+      }
+      await sendMessage.mutateAsync({ content, attachmentIds })
+    } catch (error) {
+      void message.error(error instanceof ApiError ? error.message : 'Message could not be sent')
+    } finally {
+      setUploading(false)
     }
-    sendMessage.mutate(content)
+  }
+
+  const selectFiles = (files: FileList | null) => {
+    if (!files) return
+    const accepted: File[] = []
+    for (const file of Array.from(files)) {
+      if (!ALLOWED_ATTACHMENT_TYPES.has(file.type)) {
+        void message.warning(`${file.name}: file type is not supported`)
+      } else if (file.size > MAX_ATTACHMENT_BYTES) {
+        void message.warning(`${file.name}: file exceeds 10 MB`)
+      } else {
+        accepted.push(file)
+      }
+    }
+    setPendingFiles((current) => [...current, ...accepted].slice(0, MAX_ATTACHMENTS))
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const updateDraft = (value: string) => {
@@ -250,13 +363,18 @@ export function ChatPage() {
                 const own = item.sender_id === user.id
                 const receipt = receiptUpdates[item.id] ?? item.receipts[0]
                 const receiptLabel = receipt?.read_at ? 'Read' : receipt?.delivered_at ? 'Delivered' : 'Sent'
-                return <div key={item.id} className={`message-line ${own ? 'own' : ''}`}><div className="message-meta"><strong>{own ? 'You' : item.sender_username}</strong><time>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div><div className="message-bubble">{item.content}</div>{own && <small className="receipt-state">{receiptLabel}</small>}</div>
+                return <div key={item.id} className={`message-line ${own ? 'own' : ''}`}><div className="message-meta"><strong>{own ? 'You' : item.sender_username}</strong><time>{new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div><div className="message-bubble">{item.content && <div className="message-text">{item.content}</div>}{item.attachments.length > 0 && <div className="message-attachments">{item.attachments.map((attachment) => <AttachmentView key={attachment.id} attachment={attachment} accessToken={accessToken} />)}</div>}</div>{own && <small className="receipt-state">{receiptLabel}</small>}</div>
               })}
               {peerTyping && <div className="typing-indicator"><i /><i /><i /><span>{peer?.username} is typing</span></div>}
             </div>
-            <div className="composer">
-              <Input.TextArea aria-label="Message" rows={1} value={draft} placeholder={`Message ${conversationTitle(selected, user.id)}`} onChange={(event) => updateDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); submitMessage() } }} />
-              <Button type="primary" shape="circle" aria-label="Send message" icon={<SendOutlined />} loading={sendMessage.isPending} disabled={!draft.trim()} onClick={submitMessage} />
+            <div className="composer-shell">
+              {pendingFiles.length > 0 && <div className="pending-attachments">{pendingFiles.map((file, index) => <span key={`${file.name}-${file.size}-${index}`}><PaperClipOutlined /><span><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><Button type="text" size="small" aria-label={`Remove ${file.name}`} icon={<CloseOutlined />} onClick={() => setPendingFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))} /></span>)}</div>}
+              <div className="composer">
+                <input ref={fileInputRef} className="file-input" aria-label="Choose attachments" type="file" multiple accept={[...ALLOWED_ATTACHMENT_TYPES].join(',')} onChange={(event) => selectFiles(event.target.files)} />
+                <Tooltip title="Attach files"><Button shape="circle" aria-label="Attach files" icon={<PaperClipOutlined />} disabled={pendingFiles.length >= MAX_ATTACHMENTS || uploading} onClick={() => fileInputRef.current?.click()} /></Tooltip>
+                <Input.TextArea aria-label="Message" rows={1} value={draft} placeholder={`Message ${conversationTitle(selected, user.id)}`} onChange={(event) => updateDraft(event.target.value)} onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submitMessage() } }} />
+                <Button type="primary" shape="circle" aria-label="Send message" icon={<SendOutlined />} loading={sendMessage.isPending || uploading} disabled={!draft.trim() && pendingFiles.length === 0} onClick={() => void submitMessage()} />
+              </div>
             </div>
           </>
         )}

@@ -105,8 +105,8 @@ export function useRealtimeChat(accessToken: string | null, onError: (event: Err
   ])
 
   const sendMessage = useCallback(
-    (conversationId: string, content: string) =>
-      clientRef.current?.sendMessage(conversationId, content) ?? false,
+    (conversationId: string, content: string, attachmentIds: string[] = []) =>
+      clientRef.current?.sendMessage(conversationId, content, attachmentIds) ?? false,
     [],
   )
   const sendTyping = useCallback(

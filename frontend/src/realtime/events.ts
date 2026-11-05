@@ -66,6 +66,7 @@ export interface MessageSendEvent {
   request_id: string
   conversation_id: string
   content: string
+  attachment_ids: string[]
 }
 
 export interface MessageReadRequest {

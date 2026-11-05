@@ -1,8 +1,8 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository contains the **horizontally scalable realtime release**: asynchronous FastAPI instances backed by PostgreSQL and Redis, secure token-based authentication, direct conversations, persisted message history and receipts, distributed presence and typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository contains the **message attachments release**: horizontally scalable FastAPI instances backed by PostgreSQL and Redis, private MinIO object storage, secure token-based authentication, direct conversations, persisted message history and receipts, distributed presence and typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
 
-Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub routes user-targeted events across instances, while expiring Redis leases coordinate global presence and typing state. PostgreSQL remains the source of truth for users, conversations, messages, receipts, unread counts, and `last_seen`.
+Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub routes user-targeted events across instances, while expiring Redis leases coordinate global presence and typing state. PostgreSQL remains the source of truth for users, conversations, messages, attachment metadata, receipts, unread counts, and `last_seen`. MinIO stores private attachment objects; browsers upload directly through short-lived presigned URLs, while downloads are authorized and streamed by the API.
 
 ## Foundation features
 
@@ -29,6 +29,11 @@ Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub r
 - Redis-backed rate limits shared by every backend instance
 - Automatic reconnect with exponential backoff up to 30 seconds
 - Post-cursor REST recovery for messages missed while disconnected
+- Private message attachments for images, PDF, ZIP, and text files
+- Short-lived presigned MinIO uploads with size and media-type verification
+- Transactional, single-use attachment binding to messages
+- Membership-authorized attachment downloads streamed through the API
+- Distributed cleanup of abandoned uploads using a Redis lock
 - Consistent API error envelopes without sensitive fields
 - Async SQLAlchemy 2 data access and Alembic migrations
 - Responsive React + TypeScript authentication and chat workspace
@@ -48,10 +53,12 @@ flowchart LR
     API2 <-->|Pub/Sub + leases| Redis
     API1 --> DB[(PostgreSQL)]
     API2 --> DB
-    API1 -. attachment phase .-> MinIO[(MinIO)]
+    Browser -->|Presigned PUT| MinIO[(Private MinIO bucket)]
+    API1 -->|Validate + stream| MinIO
+    API2 -->|Validate + stream| MinIO
 ```
 
-The backend is a layered modular monolith. Routes handle HTTP concerns, services own business transactions, repositories contain database queries, schemas define external contracts, and SQLAlchemy models define persistence. Redis contains only recoverable coordination state; a Redis outage never changes the durable message model.
+The backend is a layered modular monolith. Routes handle HTTP concerns, services own business transactions, repositories contain database queries, schemas define external contracts, and SQLAlchemy models define persistence. Redis contains only recoverable coordination state; a Redis outage never changes the durable message model. The MinIO bucket has no anonymous read policy, so every download still passes through conversation authorization.
 
 ## Technology stack
 
@@ -92,7 +99,7 @@ Open:
 - API health check: <http://localhost:8000/health>
 - MinIO console: <http://localhost:9001>
 
-The backend waits for PostgreSQL, applies `alembic upgrade head`, and then starts Uvicorn. Stop the stack with `docker compose down`. Volumes are retained; `docker compose down -v` also removes local development data.
+The one-shot migration service waits for PostgreSQL and applies `alembic upgrade head` before any API replicas start. Stop the stack with `docker compose down`. Volumes are retained; `docker compose down -v` also removes local development data.
 
 ## Local development
 
@@ -139,6 +146,19 @@ The Vite app runs at <http://localhost:5173> and calls `http://localhost:8000` b
 | `RECEIPT_RATE_LIMIT` | Read updates allowed per user/window | `120` |
 | `MINIO_ROOT_USER` | Local object-storage administrator | `minioadmin` |
 | `MINIO_ROOT_PASSWORD` | Local object-storage password | Development-only value |
+| `MINIO_CORS_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to upload | Ports `3000` and `5173` |
+| `MINIO_ENDPOINT` | Backend-visible MinIO host and port | `minio:9000` in Compose |
+| `MINIO_PUBLIC_ENDPOINT` | Browser-visible host and port used in presigned URLs | `localhost:9000` |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Credentials used to sign and access attachment objects | Local administrator credentials |
+| `MINIO_BUCKET` | Private attachment bucket | `chat-attachments` |
+| `MINIO_REGION` | S3 signing region | `us-east-1` |
+| `MINIO_SECURE` / `MINIO_PUBLIC_SECURE` | Enable HTTPS for internal/public endpoints | `false` |
+| `MINIO_REQUIRED` | Fail startup when attachment storage is unavailable | `true` in Compose |
+| `ATTACHMENT_MAX_BYTES` | Maximum object size accepted by the API | `10485760` (10 MiB) |
+| `ATTACHMENT_MAX_PER_MESSAGE` | Maximum attachments bound to one message | `5` |
+| `ATTACHMENT_UPLOAD_EXPIRE_MINUTES` | Presigned upload URL lifetime | `15` |
+| `ATTACHMENT_PENDING_TTL_HOURS` | Age after which an unbound upload is abandoned | `24` |
+| `ATTACHMENT_CLEANUP_INTERVAL_SECONDS` | Distributed cleanup interval | `3600` |
 | `VITE_API_URL` | Browser-visible API base URL | `http://localhost:8000` |
 
 Never use the example credentials in a deployed environment. For a public deployment, refresh tokens should move from browser session storage to Secure, HttpOnly, SameSite cookies with CSRF protection.
@@ -161,6 +181,9 @@ All request and response bodies use JSON. Interactive OpenAPI documentation is g
 | `GET` | `/conversations/{id}` | Bearer access token | Get an authorized conversation |
 | `GET` | `/conversations/{id}/messages` | Bearer access token | Read history with `before` or recover with `after` |
 | `POST` | `/conversations/{id}/messages` | Bearer access token | Persist a message |
+| `POST` | `/conversations/{id}/attachments` | Bearer access token + membership | Reserve metadata and receive a presigned PUT URL |
+| `POST` | `/attachments/{id}/complete` | Bearer access token + uploader | Verify and finalize an uploaded object |
+| `GET` | `/attachments/{id}/download` | Bearer access token + membership | Stream an attachment from private storage |
 
 Errors have one stable envelope:
 
@@ -172,6 +195,15 @@ Errors have one stable envelope:
   }
 }
 ```
+
+### Attachment flow
+
+1. Reserve an attachment with its sanitized filename, media type, and exact byte size.
+2. Upload the object directly to the returned presigned MinIO URL using the returned headers.
+3. Complete the reservation so the API verifies the object's size and media type.
+4. Include the finalized attachment UUID in a REST or WebSocket message request.
+
+Finalized attachments can be bound once, only by their uploader, and only to the conversation for which they were reserved. Binding the attachment and creating the message happen in one PostgreSQL transaction. Unbound reservations are removed from MinIO and PostgreSQL after their configured TTL.
 
 ### Token behavior
 
@@ -224,7 +256,8 @@ Client event:
   "type": "message.send",
   "request_id": "client-generated-id",
   "conversation_id": "uuid",
-  "content": "Hello"
+  "content": "Hello",
+  "attachment_ids": ["attachment-uuid"]
 }
 ```
 
@@ -247,6 +280,16 @@ Successful server event:
     "created_at": "timestamp",
     "edited_at": null,
     "cursor": "opaque-cursor",
+    "attachments": [
+      {
+        "id": "attachment-uuid",
+        "filename": "photo.png",
+        "mime_type": "image/png",
+        "file_size": 12345,
+        "uploaded_at": "timestamp",
+        "download_url": "/attachments/attachment-uuid/download"
+      }
+    ],
     "receipts": [
       {
         "user_id": "recipient-uuid",
@@ -272,6 +315,10 @@ The browser reconnects with exponential backoff. After a successful reconnection
 - **WebSockets for events, REST for resources:** REST remains cacheable and easy to paginate; WebSockets provide low-latency server push without polling.
 - **Subprotocol authentication:** access tokens are carried in `Sec-WebSocket-Protocol`, avoiding query-string token leakage. A future cookie-based deployment can replace this without changing event payloads.
 - **Persist then publish:** `message.send` reuses the same authorization and persistence service as REST. A failed transaction never produces `message.created`.
+- **Direct upload, authorized download:** attachment bytes bypass the API on upload through a short-lived presigned URL, but reads are streamed by the API after conversation membership is checked.
+- **Private objects and durable metadata:** MinIO objects are not public. PostgreSQL tracks ownership, conversation scope, expected size/type, upload completion, and the single message binding.
+- **Transactional attachment binding:** row locks prevent two messages from claiming the same attachment, and message creation commits the binding atomically.
+- **Distributed garbage collection:** one backend at a time claims a Redis lock and removes expired, unbound objects in bounded batches.
 - **PostgreSQL as source of truth:** a message is delivered as a durable event only after it has been authorized and persisted. Redis will never be the canonical message store.
 - **Durable receipts, ephemeral activity:** delivered/read timestamps and `last_seen` live in PostgreSQL. Redis stores only replaceable Pub/Sub messages, leases, typing expirations, and rate-limit counters.
 - **Distributed presence semantics:** sorted-set leases represent each instance serving a user. Only the first global connection emits online, and only the last global disconnection emits offline. A surviving instance detects expired crash leases.
@@ -280,7 +327,7 @@ The browser reconnects with exponential backoff. After a successful reconnection
 - **Refresh rotation:** server-side token records make logout and replay prevention possible without storing raw tokens.
 - **UUID identifiers:** IDs can be created safely across future application instances without relying on a central sequence.
 - **Redis is not canonical:** Pub/Sub can be lossy by design because cursor recovery closes message gaps after reconnect. PostgreSQL remains authoritative.
-- **Ordering and recovery:** the message phase will order history by `(created_at, id)` and use that pair as an opaque cursor. Reconnecting clients will request records after their last durable cursor, covering gaps during disconnects.
+- **Ordering and recovery:** message history is ordered by `(created_at, id)` and uses that pair as an opaque cursor. Reconnecting clients request records after their last durable cursor, covering gaps during disconnects.
 
 ## Project structure
 
@@ -293,14 +340,14 @@ The browser reconnects with exponential backoff. After a successful reconnection
 ├── backend
 │   ├── alembic/
 │   │   ├── env.py
-│   │   └── versions/          # users, messaging, and receipt migrations
+│   │   └── versions/             # users, messaging, receipts, and attachments
 │   ├── app
 │   │   ├── api/                 # HTTP routes and dependencies
 │   │   ├── core/                # configuration, database, errors, security
 │   │   ├── models/              # SQLAlchemy persistence models
 │   │   ├── repositories/        # database queries
 │   │   ├── schemas/             # external request/response contracts
-│   │   ├── services/            # authentication business logic
+│   │   ├── services/             # application transactions and cleanup workers
 │   │   └── main.py
 │   ├── tests/test_auth.py
 │   ├── Dockerfile
@@ -320,4 +367,4 @@ The browser reconnects with exponential backoff. After a successful reconnection
 
 ## Next increment
 
-Add message attachments backed by MinIO: presigned uploads, file metadata validation, authorization-aware downloads, attachment rendering, and cleanup of abandoned objects.
+Add production observability and deployment hardening: structured request correlation, metrics, tracing, alert-ready health signals, object malware-scanning hooks, and documented backup/restore procedures for PostgreSQL, Redis, and MinIO.

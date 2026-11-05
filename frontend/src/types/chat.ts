@@ -17,6 +17,22 @@ export interface MessageReceipt {
   read_at: string | null
 }
 
+export interface Attachment {
+  id: string
+  filename: string
+  mime_type: string
+  file_size: number
+  uploaded_at: string | null
+  download_url: string
+}
+
+export interface AttachmentUpload {
+  attachment: Attachment
+  upload_url: string
+  upload_headers: Record<string, string>
+  expires_at: string
+}
+
 export interface Message {
   id: string
   conversation_id: string
@@ -27,6 +43,7 @@ export interface Message {
   edited_at: string | null
   cursor: string
   receipts: MessageReceipt[]
+  attachments: Attachment[]
 }
 
 export interface Conversation {

@@ -39,7 +39,10 @@ async def handle_message_send(
 ) -> None:
     async with session_factory() as session:
         message = await MessageService(session).create(
-            event.conversation_id, user_id, event.content
+            event.conversation_id,
+            user_id,
+            event.content,
+            event.attachment_ids,
         )
         member_ids = await ConversationRepository(session).member_ids(event.conversation_id)
     outgoing = MessageCreatedEvent(
