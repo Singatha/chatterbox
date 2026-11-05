@@ -3,7 +3,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.storage import StoredObjectMetadata, get_object_storage
+from app.core.errors import AppError
+from app.core.scanning import get_attachment_scanner
+from app.core.storage import ObjectChangedError, StoredObjectMetadata, get_object_storage
 from app.main import app
 from app.models.attachment import Attachment
 from app.services.attachment_service import AttachmentService
@@ -43,14 +45,62 @@ class FakeStorage:
     async def get(self, storage_key: str) -> FakeDownload:
         return FakeDownload(self.objects[storage_key][1])
 
+    async def copy_if_unchanged(
+        self, source_key: str, destination_key: str, etag: str
+    ) -> None:
+        metadata, content = self.objects[source_key]
+        if metadata.etag != etag:
+            raise ObjectChangedError
+        self.objects[destination_key] = (metadata, content)
+
     async def remove(self, storage_key: str) -> None:
         self.objects.pop(storage_key, None)
         self.removed.append(storage_key)
 
 
+class RecordingScanner:
+    name = "test"
+
+    def __init__(self) -> None:
+        self.scanned: list[str] = []
+
+    async def scan(self, storage: FakeStorage, storage_key: str) -> None:
+        assert storage_key in storage.objects
+        self.scanned.append(storage_key)
+
+
+class RejectingScanner:
+    name = "test"
+
+    async def scan(self, storage: FakeStorage, storage_key: str) -> None:
+        del storage, storage_key
+        raise AppError(
+            422,
+            "ATTACHMENT_INFECTED",
+            "The uploaded file did not pass the security scan",
+        )
+
+
+class ReplacingScanner:
+    name = "test"
+
+    async def scan(self, storage: FakeStorage, storage_key: str) -> None:
+        metadata, content = storage.objects[storage_key]
+        storage.objects[storage_key] = (
+            StoredObjectMetadata(
+                size=metadata.size,
+                content_type=metadata.content_type,
+                etag="replacement-etag",
+            ),
+            content,
+        )
+
+
 async def test_attachment_upload_message_and_authorized_download(client) -> None:
     storage = FakeStorage()
+    scanner = RecordingScanner()
     app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_attachment_scanner] = lambda: scanner
     alice = await register_user(client, "alice")
     bob = await register_user(client, "bob")
     mallory = await register_user(client, "mallory")
@@ -84,7 +134,9 @@ async def test_attachment_upload_message_and_authorized_download(client) -> None
     assert reservation["attachment"]["filename"] == "notes.txt"
     assert reservation["upload_url"].startswith("http://uploads.test/")
     storage.objects[storage.last_key] = (
-        StoredObjectMetadata(size=len(content), content_type="text/plain"),
+        StoredObjectMetadata(
+            size=len(content), content_type="text/plain", etag="clean-etag"
+        ),
         content,
     )
 
@@ -94,6 +146,9 @@ async def test_attachment_upload_message_and_authorized_download(client) -> None
     )
     assert completed.status_code == 200
     assert completed.json()["uploaded_at"] is not None
+    assert scanner.scanned == [storage.last_key]
+    assert storage.last_key not in storage.objects
+    assert any(key.startswith("objects/") for key in storage.objects)
 
     sent = await client.post(
         f"/conversations/{conversation['id']}/messages",
@@ -140,7 +195,7 @@ async def test_attachment_completion_rejects_tampered_object(client) -> None:
     )
     attachment_id = reserved.json()["attachment"]["id"]
     storage.objects[storage.last_key] = (
-        StoredObjectMetadata(size=21, content_type="image/png"),
+        StoredObjectMetadata(size=21, content_type="image/png", etag="tampered-etag"),
         b"x" * 21,
     )
 
@@ -150,6 +205,76 @@ async def test_attachment_completion_rejects_tampered_object(client) -> None:
 
     assert completed.status_code == 422
     assert completed.json()["error"]["code"] == "ATTACHMENT_SIZE_MISMATCH"
+
+
+async def test_attachment_completion_rejects_infected_object(client) -> None:
+    storage = FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_attachment_scanner] = lambda: RejectingScanner()
+    alice = await register_user(client, "alice")
+    bob = await register_user(client, "bob")
+    conversation = await create_direct(client, alice, bob)
+    content = b"safe test fixture"
+    reserved = await client.post(
+        f"/conversations/{conversation['id']}/attachments",
+        headers=auth_headers(alice),
+        json={
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "file_size": len(content),
+        },
+    )
+    attachment_id = reserved.json()["attachment"]["id"]
+    storage.objects[storage.last_key] = (
+        StoredObjectMetadata(
+            size=len(content), content_type="text/plain", etag="infected-etag"
+        ),
+        content,
+    )
+
+    completed = await client.post(
+        f"/attachments/{attachment_id}/complete", headers=auth_headers(alice)
+    )
+
+    assert completed.status_code == 422
+    assert completed.json()["error"]["code"] == "ATTACHMENT_INFECTED"
+    assert completed.json()["error"]["message"] == (
+        "The uploaded file did not pass the security scan"
+    )
+
+
+async def test_attachment_completion_rejects_object_changed_during_scan(client) -> None:
+    storage = FakeStorage()
+    app.dependency_overrides[get_object_storage] = lambda: storage
+    app.dependency_overrides[get_attachment_scanner] = lambda: ReplacingScanner()
+    alice = await register_user(client, "alice")
+    bob = await register_user(client, "bob")
+    conversation = await create_direct(client, alice, bob)
+    content = b"original upload"
+    reserved = await client.post(
+        f"/conversations/{conversation['id']}/attachments",
+        headers=auth_headers(alice),
+        json={
+            "filename": "notes.txt",
+            "mime_type": "text/plain",
+            "file_size": len(content),
+        },
+    )
+    attachment_id = reserved.json()["attachment"]["id"]
+    storage.objects[storage.last_key] = (
+        StoredObjectMetadata(
+            size=len(content), content_type="text/plain", etag="original-etag"
+        ),
+        content,
+    )
+
+    completed = await client.post(
+        f"/attachments/{attachment_id}/complete", headers=auth_headers(alice)
+    )
+
+    assert completed.status_code == 409
+    assert completed.json()["error"]["code"] == "ATTACHMENT_CHANGED"
+    assert not any(key.startswith("objects/") for key in storage.objects)
 
 
 async def test_abandoned_attachment_cleanup(

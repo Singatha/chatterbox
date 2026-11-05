@@ -1,6 +1,6 @@
 # Chatterbox
 
-Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository contains the **message attachments release**: horizontally scalable FastAPI instances backed by PostgreSQL and Redis, private MinIO object storage, secure token-based authentication, direct conversations, persisted message history and receipts, distributed presence and typing signals, reconnect recovery, a responsive React chat workspace, migrations, tests, containers, and CI.
+Chatterbox is a production-minded realtime chat application being built incrementally as a modular monolith. This repository contains the **observability and hardening release**: horizontally scalable FastAPI instances backed by PostgreSQL and Redis, private MinIO object storage, secure token-based authentication, direct conversations, persisted message history and receipts, distributed presence and typing signals, reconnect recovery, a responsive React chat workspace, operational telemetry, health probes, optional malware scanning, migrations, tests, containers, and CI.
 
 Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub routes user-targeted events across instances, while expiring Redis leases coordinate global presence and typing state. PostgreSQL remains the source of truth for users, conversations, messages, attachment metadata, receipts, unread counts, and `last_seen`. MinIO stores private attachment objects; browsers upload directly through short-lived presigned URLs, while downloads are authorized and streamed by the API.
 
@@ -34,6 +34,13 @@ Each FastAPI instance owns only its local WebSocket connections. Redis Pub/Sub r
 - Transactional, single-use attachment binding to messages
 - Membership-authorized attachment downloads streamed through the API
 - Distributed cleanup of abandoned uploads using a Redis lock
+- Optional fail-closed ClamAV scanning before an upload can be attached
+- ETag-guarded promotion from mutable upload keys to immutable delivery keys
+- JSON request logs with validated correlation IDs and trace correlation
+- Prometheus HTTP, WebSocket, and attachment-scan metrics with alert rules
+- Optional OTLP/HTTP tracing for FastAPI and SQLAlchemy
+- Separate liveness and dependency-aware readiness probes
+- Gateway security headers and documented backup, restore, and rotation runbooks
 - Consistent API error envelopes without sensitive fields
 - Async SQLAlchemy 2 data access and Alembic migrations
 - Responsive React + TypeScript authentication and chat workspace
@@ -53,9 +60,15 @@ flowchart LR
     API2 <-->|Pub/Sub + leases| Redis
     API1 --> DB[(PostgreSQL)]
     API2 --> DB
+    Prometheus[Prometheus] -->|Scrape metrics| API1
+    Prometheus -->|Scrape metrics| API2
+    API1 -.->|Optional OTLP traces| Collector[OTel collector]
+    API2 -.->|Optional OTLP traces| Collector
     Browser -->|Presigned PUT| MinIO[(Private MinIO bucket)]
     API1 -->|Validate + stream| MinIO
     API2 -->|Validate + stream| MinIO
+    API1 -.->|Optional scan| ClamAV[ClamAV]
+    API2 -.->|Optional scan| ClamAV
 ```
 
 The backend is a layered modular monolith. Routes handle HTTP concerns, services own business transactions, repositories contain database queries, schemas define external contracts, and SQLAlchemy models define persistence. Redis contains only recoverable coordination state; a Redis outage never changes the durable message model. The MinIO bucket has no anonymous read policy, so every download still passes through conversation authorization.
@@ -69,7 +82,8 @@ The backend is a layered modular monolith. Routes handle HTTP concerns, services
 | Authentication | Argon2 via pwdlib, signed JWTs, persisted refresh-token JTIs |
 | Web | React, strict TypeScript, Vite, Ant Design |
 | Client state | TanStack Query, Zustand |
-| Infrastructure | Docker Compose, Redis, MinIO, Nginx |
+| Infrastructure | Docker Compose, Redis, MinIO, Nginx, Prometheus, optional ClamAV |
+| Observability | JSON logs, Prometheus metrics/alerts, OpenTelemetry OTLP tracing |
 | Quality | Pytest, Ruff, Vitest, Testing Library, ESLint, GitHub Actions |
 
 ## Quick start with Docker
@@ -98,6 +112,7 @@ Open:
 - API documentation: <http://localhost:8000/docs>
 - API health check: <http://localhost:8000/health>
 - MinIO console: <http://localhost:9001>
+- Prometheus: <http://localhost:9090>
 
 The one-shot migration service waits for PostgreSQL and applies `alembic upgrade head` before any API replicas start. Stop the stack with `docker compose down`. Volumes are retained; `docker compose down -v` also removes local development data.
 
@@ -159,6 +174,14 @@ The Vite app runs at <http://localhost:5173> and calls `http://localhost:8000` b
 | `ATTACHMENT_UPLOAD_EXPIRE_MINUTES` | Presigned upload URL lifetime | `15` |
 | `ATTACHMENT_PENDING_TTL_HOURS` | Age after which an unbound upload is abandoned | `24` |
 | `ATTACHMENT_CLEANUP_INTERVAL_SECONDS` | Distributed cleanup interval | `3600` |
+| `ATTACHMENT_SCAN_MODE` | Attachment scanner: `disabled` or `clamav` | `disabled` |
+| `CLAMAV_HOST` / `CLAMAV_PORT` | ClamAV daemon endpoint | `clamav:3310` in Compose |
+| `CLAMAV_TIMEOUT_SECONDS` | Per-file scan timeout | `15` |
+| `LOG_LEVEL` | Structured backend log level | `INFO` |
+| `OTEL_SERVICE_NAME` | OpenTelemetry service identity | `chatterbox-api` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional OTLP/HTTP traces endpoint | Empty (disabled) |
+| `OTEL_EXPORT_TIMEOUT_SECONDS` | Trace export timeout | `5` |
+| `HEALTH_CHECK_TIMEOUT_SECONDS` | Per-dependency readiness timeout | `2` |
 | `VITE_API_URL` | Browser-visible API base URL | `http://localhost:8000` |
 
 Never use the example credentials in a deployed environment. For a public deployment, refresh tokens should move from browser session storage to Secure, HttpOnly, SameSite cookies with CSRF protection.
@@ -200,10 +223,32 @@ Errors have one stable envelope:
 
 1. Reserve an attachment with its sanitized filename, media type, and exact byte size.
 2. Upload the object directly to the returned presigned MinIO URL using the returned headers.
-3. Complete the reservation so the API verifies the object's size and media type.
+3. Complete the reservation so the API verifies the object's size and media type,
+   runs the configured malware scanner, and conditionally promotes that exact ETag
+   to a separate delivery key.
 4. Include the finalized attachment UUID in a REST or WebSocket message request.
 
 Finalized attachments can be bound once, only by their uploader, and only to the conversation for which they were reserved. Binding the attachment and creating the message happen in one PostgreSQL transaction. Unbound reservations are removed from MinIO and PostgreSQL after their configured TTL.
+
+Scanning is disabled for local development. To run the included ClamAV daemon and
+fail closed when it is unavailable:
+
+```bash
+ATTACHMENT_SCAN_MODE=clamav docker compose --profile security up --build
+```
+
+## Operations and observability
+
+`/health/live` is a process liveness probe, while `/health/ready` actively checks
+PostgreSQL, Redis, and MinIO and returns 503 if a required dependency is unavailable.
+The backend's internal `/metrics` route exposes Prometheus-format metrics and is
+blocked at the public gateway. Every HTTP response carries an `X-Request-ID`, which
+is also included in structured JSON logs and exported spans.
+
+Tracing is enabled only when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` points to an
+OTLP/HTTP traces endpoint. Prometheus is configured to discover all Compose backend
+replicas rather than scraping only the gateway. See [the operations runbook](docs/operations.md)
+for alert triage, scanner behavior, backup/restore drills, and secret rotation.
 
 ### Token behavior
 
@@ -319,6 +364,10 @@ The browser reconnects with exponential backoff. After a successful reconnection
 - **Private objects and durable metadata:** MinIO objects are not public. PostgreSQL tracks ownership, conversation scope, expected size/type, upload completion, and the single message binding.
 - **Transactional attachment binding:** row locks prevent two messages from claiming the same attachment, and message creation commits the binding atomically.
 - **Distributed garbage collection:** one backend at a time claims a Redis lock and removes expired, unbound objects in bounded batches.
+- **Fail-closed scan boundary:** when ClamAV scanning is enabled, an object cannot be finalized or attached unless the scanner returns a clean result.
+- **Immutable delivery object:** finalization copies the verified ETag away from the presigned staging key, so a still-valid upload URL cannot replace a scanned attachment.
+- **Bounded telemetry labels:** HTTP metrics use route templates rather than raw paths, preventing user-controlled IDs from creating unbounded Prometheus series.
+- **Probe separation:** liveness observes only the process; readiness gates traffic on required durable and coordination dependencies.
 - **PostgreSQL as source of truth:** a message is delivered as a durable event only after it has been authorized and persisted. Redis will never be the canonical message store.
 - **Durable receipts, ephemeral activity:** delivered/read timestamps and `last_seen` live in PostgreSQL. Redis stores only replaceable Pub/Sub messages, leases, typing expirations, and rate-limit counters.
 - **Distributed presence semantics:** sorted-set leases represent each instance serving a user. Only the first global connection emits online, and only the last global disconnection emits offline. A surviving instance detects expired crash leases.
@@ -336,7 +385,9 @@ The browser reconnects with exponential backoff. After a successful reconnection
 ├── .github/workflows/ci.yml
 ├── .env.example
 ├── docker-compose.yml
+├── docs/operations.md            # alerts, scanning, backup/restore, rotation
 ├── gateway/nginx.conf            # REST and WebSocket load-balancing gateway
+├── observability/                # Prometheus scrape configuration and alerts
 ├── backend
 │   ├── alembic/
 │   │   ├── env.py
@@ -367,4 +418,5 @@ The browser reconnects with exponential backoff. After a successful reconnection
 
 ## Next increment
 
-Add production observability and deployment hardening: structured request correlation, metrics, tracing, alert-ready health signals, object malware-scanning hooks, and documented backup/restore procedures for PostgreSQL, Redis, and MinIO.
+Add group conversations and roles, including membership changes, authorization
+rules, system events, and frontend group-management flows.

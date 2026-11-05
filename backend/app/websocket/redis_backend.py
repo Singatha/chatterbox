@@ -94,6 +94,9 @@ class RedisRealtimeBackend:
     def available(self) -> bool:
         return self._available
 
+    async def ping(self) -> bool:
+        return bool(await self._redis.ping())
+
     @property
     def events_channel(self) -> str:
         return f"{self.key_prefix}:realtime:events"

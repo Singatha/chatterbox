@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -6,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.errors import AppError
-from app.core.storage import ObjectStorage
+from app.core.scanning import AttachmentScanner, attachment_scanner
+from app.core.storage import ObjectChangedError, ObjectStorage
 from app.models.attachment import Attachment
 from app.repositories.attachment_repository import AttachmentRepository
 from app.schemas.attachment import AttachmentResponse, AttachmentUploadResponse
@@ -21,12 +23,19 @@ ALLOWED_MIME_TYPES = {
     "image/webp",
     "text/plain",
 }
+logger = logging.getLogger(__name__)
 
 
 class AttachmentService:
-    def __init__(self, session: AsyncSession, storage: ObjectStorage) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        storage: ObjectStorage,
+        scanner: AttachmentScanner = attachment_scanner,
+    ) -> None:
         self.session = session
         self.storage = storage
+        self.scanner = scanner
         self.attachments = AttachmentRepository(session)
         self.conversations = ConversationService(session)
 
@@ -42,7 +51,9 @@ class AttachmentService:
         self._validate_metadata(mime_type, file_size)
         attachment_id = uuid4()
         suffix = Path(filename).suffix.lower()[:16]
-        storage_key = f"{conversation_id}/{uploader_id}/{attachment_id}{suffix}"
+        storage_key = (
+            f"pending/{conversation_id}/{uploader_id}/{attachment_id}{suffix}"
+        )
         attachment = Attachment(
             id=attachment_id,
             conversation_id=conversation_id,
@@ -80,8 +91,35 @@ class AttachmentService:
             raise AppError(422, "ATTACHMENT_SIZE_MISMATCH", "Uploaded file size is invalid")
         if actual_mime_type != attachment.mime_type:
             raise AppError(422, "ATTACHMENT_TYPE_MISMATCH", "Uploaded file type is invalid")
+        await self.scanner.scan(self.storage, attachment.storage_key)
+        source_key = attachment.storage_key
+        suffix = Path(attachment.filename).suffix.lower()[:16]
+        final_key = (
+            f"objects/{attachment.conversation_id}/{attachment.uploader_id}/"
+            f"{attachment.id}{suffix}"
+        )
+        try:
+            await self.storage.copy_if_unchanged(
+                source_key,
+                final_key,
+                metadata.etag,
+            )
+        except ObjectChangedError as exc:
+            raise AppError(
+                409,
+                "ATTACHMENT_CHANGED",
+                "The uploaded file changed during verification; upload it again",
+            ) from exc
+        attachment.storage_key = final_key
         attachment.uploaded_at = datetime.now(timezone.utc)
         await self.session.commit()
+        try:
+            await self.storage.remove(source_key)
+        except Exception:
+            logger.warning(
+                "Finalized attachment staging object could not be removed",
+                extra={"attachment_id": str(attachment.id)},
+            )
         return self.to_response(attachment)
 
     async def authorize_download(
