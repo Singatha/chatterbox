@@ -34,6 +34,7 @@ dev = [
   "fakeredis[lua]>=2.25,<3",
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",
+  "pytest-timeout>=2.3,<3",
   "ruff>=0.6,<1",
 ]
 
@@ -42,6 +43,7 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+timeout = 30
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -5,11 +5,16 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import StaticPool
 from starlette.datastructures import Headers
 from starlette.websockets import WebSocketDisconnect
 
-from app.core.database import get_session_factory
+from app.core.database import Base, get_session_factory
 from app.main import app
 from app.models.user import User
 from app.services.receipt_service import ReceiptService
@@ -45,17 +50,25 @@ def test_access_token_uses_websocket_subprotocol_header() -> None:
 
 
 def test_websocket_rejects_missing_authentication() -> None:
-    client = TestClient(app)
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with client.websocket_connect("/ws"):
-            pass
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws"):
+                pass
     assert exc.value.code == 1008
 
 
-async def test_websocket_accepts_authenticated_connection(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
+def test_websocket_accepts_authenticated_connection() -> None:
     user_id = uuid4()
+    engine = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def create_schema() -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
 
     async def override_user() -> User:
         return User(
@@ -67,16 +80,21 @@ async def test_websocket_accepts_authenticated_connection(
 
     app.dependency_overrides[get_websocket_user] = override_user
     app.dependency_overrides[get_session_factory] = lambda: session_factory
-    client = TestClient(app)
     try:
-        with client.websocket_connect(
-            "/ws", subprotocols=["access_token", "test-token"]
-        ) as websocket:
-            assert websocket.accepted_subprotocol == "access_token"
-            assert websocket.receive_json() == {
-                "type": "connection.ready",
-                "data": {"user_id": str(user_id), "online_user_ids": []},
-            }
+        with TestClient(app) as client:
+            assert client.portal is not None
+            client.portal.call(create_schema)
+            try:
+                with client.websocket_connect(
+                    "/ws", subprotocols=["access_token", "test-token"]
+                ) as websocket:
+                    assert websocket.accepted_subprotocol == "access_token"
+                    assert websocket.receive_json() == {
+                        "type": "connection.ready",
+                        "data": {"user_id": str(user_id), "online_user_ids": []},
+                    }
+            finally:
+                client.portal.call(engine.dispose)
     finally:
         app.dependency_overrides.clear()
 
