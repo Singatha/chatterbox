@@ -5,20 +5,15 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.datastructures import Headers
 from starlette.websockets import WebSocketDisconnect
 
-from app.core.database import Base, get_session_factory
+from app.api.websocket import websocket_endpoint
 from app.main import app
 from app.models.user import User
 from app.services.receipt_service import ReceiptService
-from app.websocket.auth import extract_access_token, get_websocket_user
+from app.websocket.auth import extract_access_token
 from app.websocket.events import MessageReadRequest, MessageSendEvent, TypingStartEvent
 from app.websocket.handlers import (
     dispatch_event,
@@ -41,6 +36,9 @@ class FakeWebSocket:
     async def send_json(self, event: dict) -> None:
         self.events.append(event)
 
+    async def receive_text(self) -> str:
+        raise WebSocketDisconnect(code=1000)
+
 
 def test_access_token_uses_websocket_subprotocol_header() -> None:
     websocket = SimpleNamespace(
@@ -57,46 +55,27 @@ def test_websocket_rejects_missing_authentication() -> None:
     assert exc.value.code == 1008
 
 
-def test_websocket_accepts_authenticated_connection() -> None:
+async def test_websocket_accepts_authenticated_connection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     user_id = uuid4()
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+    user = User(
+        id=user_id,
+        username="alice",
+        email="alice@example.com",
+        password_hash="unused",
     )
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    websocket = FakeWebSocket()
 
-    async def create_schema() -> None:
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+    await websocket_endpoint(websocket, user, session_factory)  # type: ignore[arg-type]
 
-    async def override_user() -> User:
-        return User(
-            id=user_id,
-            username="alice",
-            email="alice@example.com",
-            password_hash="unused",
-        )
-
-    app.dependency_overrides[get_websocket_user] = override_user
-    app.dependency_overrides[get_session_factory] = lambda: session_factory
-    try:
-        with TestClient(app) as client:
-            assert client.portal is not None
-            client.portal.call(create_schema)
-            try:
-                with client.websocket_connect(
-                    "/ws", subprotocols=["access_token", "test-token"]
-                ) as websocket:
-                    assert websocket.accepted_subprotocol == "access_token"
-                    assert websocket.receive_json() == {
-                        "type": "connection.ready",
-                        "data": {"user_id": str(user_id), "online_user_ids": []},
-                    }
-            finally:
-                client.portal.call(engine.dispose)
-    finally:
-        app.dependency_overrides.clear()
+    assert websocket.accepted_subprotocol == "access_token"
+    assert websocket.events == [
+        {
+            "type": "connection.ready",
+            "data": {"user_id": str(user_id), "online_user_ids": []},
+        }
+    ]
 
 
 async def test_message_send_persists_and_broadcasts_to_both_members(
